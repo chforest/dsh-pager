@@ -25,7 +25,7 @@ jobs:
       - name: tools tests
         run: node --test tools/*.test.mjs
       - name: extension tests
-        run: node --test tasks-host/*.test.mjs recovery-host/*.test.mjs files-host/*.test.mjs screenshot-host/*.test.mjs suggestions-host/*.test.mjs antigravity-cli-host/*.test.mjs voice-extension/test/*.test.mjs market-extension/*.test.mjs
+        run: node --test async-question-host/*.test.mjs tasks-host/*.test.mjs recovery-host/*.test.mjs files-host/*.test.mjs screenshot-host/*.test.mjs suggestions-host/*.test.mjs antigravity-cli-host/*.test.mjs voice-extension/test/*.test.mjs market-extension/*.test.mjs
       - name: release privacy gate
         run: node tools/check-release.mjs
 
