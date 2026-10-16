@@ -1,0 +1,29 @@
+{
+  "upstream": {
+    "name": "dsh-voice-mode",
+    "version": "0.7.23",
+    "repository": "https://github.com/qishuilalala/dsh-voice-mode",
+    "license": "MIT"
+  },
+  "derivative": "0.7.23-pager.1",
+  "snapshotDate": "2026-10-16",
+  "format": "Editable JavaScript runtime snapshot; no upstream TypeScript build required",
+  "changes": [
+    "three separate voice modes",
+    "persistent audio messages through companion dsh-pager routes",
+    "isolated native call ASR with fallback",
+    "bounded preview cache",
+    "local prewarm and TTS latency events",
+    "call sentence boundaries and concise spoken prompt"
+  ],
+  "sha256": {
+    "lib/client.js": "2f00889dff3869a9b2b8f9a30e3e2f13ba300aa40913509906eda3ec637dc39f",
+    "lib/index.js": "bde04e2e7ec602515c357a9ee812edf24c30e85cd8ea6a14df459e7244c9d39a",
+    "lib/msedge-tts.cjs": "5bc5d00708f1e0cdba6c3a9ab8b2969a0736e18588ca195ac9de7889675d04e7",
+    "lib/native-call-asr-worker.cjs": "5643c4def26528415a1db3621e6360be3b67578bc281c77547ba9e855a49d2fd",
+    "lib/native-call-asr.mjs": "20fffa588ec0a4aa59343eca160ef0e75d11ed69def28ca8a7abe437f98ba020",
+    "lib/preview-cache.mjs": "85828ab35f5d33aa5b99494fcea32d08027720b8d5a4b4b8fd5de4e54d1045d2",
+    "lib/sense-worker.mjs": "09227ecbc3729f142a3a488b40463499391813b7b8a8160ff9ab463b1cd9ff73",
+    "lib/tts-vits-worker.cjs": "de3ce2f5b0976d17cc5f7e823da7c4a1842270ebfbac10cb8d2063f7a47359ba"
+  }
+}

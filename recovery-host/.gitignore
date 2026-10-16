@@ -1,0 +1,5 @@
+data/
+.test-output/
+fixture-*/
+node_modules/
+*.log

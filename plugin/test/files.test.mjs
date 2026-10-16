@@ -61,7 +61,7 @@ test('isSecretPath: whole words, not substrings', () => {
   for (const p of ['tokenizer.py', 'secretManager.ts', 'src/app.js', 'README.md', 'keys.ts']) {
     assert.equal(isSecretPath(p), false, p)
   }
-  assert.equal(looksSecret('-----BEGIN OPENSSH PRIVATE KEY-----\nabc'), true)
+  assert.equal(looksSecret('-----BEGIN OPENSSH '+'PRIVATE KEY-----\nabc'), true)
   assert.equal(looksSecret('a doc that mentions private keys'), false)
 })
 

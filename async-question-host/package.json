@@ -1,0 +1,1 @@
+{"name":"dsh-async-questions","version":"1.0.0","private":true,"type":"module","main":"index.js","exports":{".":"./index.js","./client":"./client.js","./package.json":"./package.json"},"dsh":{"host":{},"client":{"inject":["@deepseek-ai/dsh-client-ui-conversation"],"platform":"web"}},"peerDependencies":{"@deepseek-ai/dsh-tools":"^0.1.1-rc.2"}}

@@ -1,5 +1,13 @@
 # Android App
 
+## 1.6.0 通用安装包（versionCode 15）
+
+本次公开构建为 `dsh-pager-v1.6.0.apk`，首次启动自行填写服务器地址，没有预设私人服务器，WebView 远程调试关闭。沿用既有公开安装包签名，可覆盖安装同签名旧版；下载后使用同批 `SHA256SUMS` 校验。
+
+本版本包含麦克风授权桥和原视频下载服务。录音首次需要系统麦克风授权；仅向已配置服务器的可信页面授予音频采集，不授予摄像头。视频通过播放器菜单下载到“下载 → DSH”，详见 [视频下载](video-downloads.md)。语音识别与合成仍需要电脑端已安装的语音服务，APK 本身不携带模型。
+
+本次本地验收：完整 SDK 编译、APK 签名验证、新旧公开包证书一致、无预设地址资源、版本与 SDK 核对通过；12 项全屏生命周期检查、15 项下载策略检查、2 项音频权限/下载 HTTP 测试通过。生命周期测试使用宿主桩，不能代替真实 WebView。本次 **未在实体手机或平板上安装验收 1.6.0**，下面设备记录属于既有版本历史。
+
 App 本身只是一个 WebView 外壳（界面由电脑上的插件提供），外加一个常驻的通知服务。支持 Android 10 及以上（minSdk 29）。
 
 实机验证过的系统：
@@ -108,15 +116,18 @@ adb logcat -s DSHNotify
 |---|---|
 | `INTERNET`、`ACCESS_NETWORK_STATE` | 连接你的电脑；网络切换时立即重连 |
 | `POST_NOTIFICATIONS`、`VIBRATE` | 发提醒 |
+| `RECORD_AUDIO`、`MODIFY_AUDIO_SETTINGS` | 用户允许后采集麦克风，供 WebView 选择音频设备 |
+| `FOREGROUND_SERVICE_DATA_SYNC` | 原视频下载时维持前台下载服务 |
 | `FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_SPECIAL_USE` | 让提醒连接在后台保持 |
 | `RECEIVE_BOOT_COMPLETED` | 开机后恢复提醒 |
 | `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | 引导你把电池策略设为不限制 |
 | `REQUEST_INSTALL_PACKAGES` | App 内更新：安装从你电脑下载的新版本（每次都由系统弹框让你确认） |
 
-App 没有统计，没有第三方 SDK，也不依赖 Google 服务。本地只存三样东西：
+App 没有统计，没有第三方 SDK，也不依赖 Google 服务。本地保存连接配置和运行状态，包括：
 - 服务器地址；
 - 网关 Cookie（如果有）；
-- 提醒序号。
+- 提醒序号；
+- 下载器未完成项的清理记录及其他必要设置。下载完成的视频保存在系统下载目录。
 
 ## 从源码编译
 

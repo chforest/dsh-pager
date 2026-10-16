@@ -9,9 +9,28 @@ android/local.properties
 
 # Build outputs
 android/out/
+android/.build-download/
+android/test/classes-download/
 
 node_modules/
 plugin/.cache/
+market-host/receipts/
 *.log
 .DS_Store
 Thumbs.db
+
+# Private runtime state and local investigation artifacts (never release).
+**/data/
+**/receipts/
+**/.cache/
+*.bak*
+*.tmp
+.env
+.env.*
+!.env.example
+*credentials*.yaml
+*credentials*.json
+*.p12
+*.pfx
+.test-output/
+release-local/

@@ -29,6 +29,7 @@ import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.webkit.CookieManager;
+import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -62,10 +63,13 @@ import java.util.ArrayList;
  * local.properties (see build.sh); nothing about a specific server is in source.
  */
 public class MainActivity extends Activity {
+    private static java.lang.ref.WeakReference<MainActivity> downloadActivity = new java.lang.ref.WeakReference<>(null);
     static final String SETUP = "file:///android_asset/setup.html";
     static final String OFFLINE = "file:///android_asset/offline.html";
     static final int PICK = 1;
     static final int REQ_NOTIFY = 2;
+    static final int REQ_MIC = 3;
+    PermissionRequest microphoneRequest;
 
     WebView web;
     ValueCallback<Uri[]> fileCb;
@@ -98,6 +102,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        downloadActivity = new java.lang.ref.WeakReference<>(this);
         prefs = getSharedPreferences("dsh", MODE_PRIVATE);
         // Private builds let `adb forward ... webview_devtools_remote` inspect the page (authorised USB
         // debugging only). Public builds keep it off: DevTools can read the gateway cookie and drive DSH.
@@ -118,6 +123,8 @@ public class MainActivity extends Activity {
         s.setUserAgentString(s.getUserAgentString() + " DSHApp/" + BuildInfo.VERSION + "+" + BuildInfo.VERSION_CODE);
 
         CookieManager.getInstance().setAcceptCookie(true);
+        web.setDownloadListener((url, userAgent, disposition, mime, length) ->
+                beginVideoDownload(url, java.util.UUID.randomUUID().toString()));
 
         web.setWebViewClient(new WebViewClient() {
             @Override
@@ -127,6 +134,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPageStarted(WebView v, String url, Bitmap icon) {
+                cancelMicrophoneRequest();
                 Uri u = Uri.parse(url);
                 if (isOurs(u) && isRoot(u)) { // an auth gateway commonly lands on "/" after login
                     v.stopLoading();
@@ -171,6 +179,32 @@ public class MainActivity extends Activity {
         });
 
         web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onPermissionRequest(PermissionRequest request) {
+                runOnUiThread(() -> {
+                    String current = web.getUrl();
+                    boolean audioOnly = request.getResources().length == 1
+                            && PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(request.getResources()[0]);
+                    if (!audioOnly || !isOurs(request.getOrigin()) || current == null
+                            || !isApp(Uri.parse(current)) || !"https".equals(request.getOrigin().getScheme())) {
+                        request.deny();
+                        return;
+                    }
+                    cancelMicrophoneRequest();
+                    microphoneRequest = request;
+                    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        finishMicrophoneRequest(true);
+                    } else {
+                        requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, REQ_MIC);
+                    }
+                });
+            }
+
+            @Override
+            public void onPermissionRequestCanceled(PermissionRequest request) {
+                if (microphoneRequest == request) microphoneRequest = null;
+            }
+
             @Override
             public void onShowCustomView(View view, CustomViewCallback callback) {
                 showFullscreen(view, callback);
@@ -309,6 +343,10 @@ public class MainActivity extends Activity {
      * silently repoint the app at another server.
      */
     void appLink(WebView v, Uri u) {
+        if ("download".equals(u.getHost())) {
+            beginVideoDownload(u.getQueryParameter("url"), u.getQueryParameter("requestId"));
+            return;
+        }
         if ("update".equals(u.getHost())) {
             // Only our own page may start an install.
             String cur = v.getUrl();
@@ -391,6 +429,13 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int req, String[] perms, int[] results) {
         super.onRequestPermissionsResult(req, perms, results);
+        if (req == REQ_MIC) {
+            boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+            // Android may deliver the permission result before onResume.
+            // Keep the request pending until our page is visible again.
+            if (!granted || resumed) finishMicrophoneRequest(granted);
+            return;
+        }
         if (req == REQ_NOTIFY && results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) askBattery();
     }
 
@@ -405,10 +450,53 @@ public class MainActivity extends Activity {
         }
     }
 
+    void cancelMicrophoneRequest() {
+        if (microphoneRequest != null) { microphoneRequest.deny(); microphoneRequest = null; }
+    }
+
+    void finishMicrophoneRequest(boolean allowed) {
+        PermissionRequest request = microphoneRequest;
+        microphoneRequest = null;
+        if (request == null) return;
+        String current = web.getUrl();
+        if (allowed && resumed && current != null && isApp(Uri.parse(current))
+                && isOurs(request.getOrigin()) && "https".equals(request.getOrigin().getScheme())) {
+            request.grant(new String[] {PermissionRequest.RESOURCE_AUDIO_CAPTURE});
+        } else request.deny();
+    }
+
     // ------------------------------------------------------------------ in-app update
 
     void toastJs(String msg, boolean err) {
         runOnUiThread(() -> web.evaluateJavascript("window.dshToast&&window.dshToast(" + JSONObject.quote(msg) + (err ? ",'err'" : "") + ")", null));
+    }
+
+    void beginVideoDownload(String target, String requestId) {
+        String id = requestId != null && requestId.matches("[a-fA-F0-9-]{36}") ? requestId : java.util.UUID.randomUUID().toString();
+        try {
+            String current = web.getUrl();
+            if (current == null || !isApp(Uri.parse(current))) throw new IOException("请从 DSH 对话里的视频下载");
+            String original = DownloadPolicy.original(server(this), target);
+            Intent intent = new Intent(this, VideoDownloadService.class)
+                    .putExtra("url", original).putExtra("origin", server(this)).putExtra("requestId", id)
+                    .putExtra("cookie", CookieManager.getInstance().getCookie(original))
+                    .putExtra("agent", web.getSettings().getUserAgentString());
+            startForegroundService(intent);
+        } catch (Exception e) { downloadResult(id,"error",e.getMessage()); }
+    }
+
+    static void downloadResult(String id, String status, String message) {
+        MainActivity activity = downloadActivity.get();
+        if (activity == null || activity.isDestroyed()) return;
+        activity.runOnUiThread(() -> {
+            if (activity.web == null || activity.isDestroyed()) return;
+            String current = activity.web.getUrl();
+            if (current == null || !activity.isApp(Uri.parse(current))) return;
+            try {
+                JSONObject result = new JSONObject().put("requestId",id).put("status",status).put("message",message);
+                activity.web.evaluateJavascript("window.dshDownloadResult?window.dshDownloadResult("+result.toString()+"):window.dshToast&&window.dshToast("+JSONObject.quote(message)+(status.equals("error")?",'err'":"")+")", null);
+            } catch (Exception ignored) {}
+        });
     }
 
     /** GET a path on our server with the gateway cookie; the caller disconnects. */
@@ -600,6 +688,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        if (microphoneRequest != null && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) finishMicrophoneRequest(true);
         NotifyService.appVisible = true;
         askPermissions();
         // Finished-task notices are stale once the user is looking at the app.
@@ -649,6 +738,7 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         resumed = false;
+        if (microphoneRequest == null && web != null) web.evaluateJavascript("window.dshStopVoice&&window.dshStopVoice()", null);
         NotifyService.appVisible = false;
         CookieManager.getInstance().flush();
         if (!server(this).isEmpty()) saveCookie();
@@ -656,6 +746,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        cancelMicrophoneRequest();
         exitFullscreen();
         super.onDestroy();
     }

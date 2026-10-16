@@ -92,7 +92,7 @@ function makeEl(tag = 'div', id = '') {
  * @param {{search?: string}} opts - `?debug` exposes window.__dsh.
  * @returns the sandbox, with `sandbox.window.__dsh` populated.
  */
-function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { accepted: true } }), readResult, agentsResult, loadedHtml = UI_BASE.snapshot, liveHtml, uiResult, appLatestResult, userAgent = 'test', visibility = 'visible', online = true } = {}) {
+function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { accepted: true } }), readResult, voiceRequest, agentsResult, loadedHtml = UI_BASE.snapshot, liveHtml, uiResult, appLatestResult, userAgent = 'test', visibility = 'visible', online = true } = {}) {
   const byId = new Map()
   const store = new Map()
   /** Every /m/api/rpc call the page makes, so tests can assert the wire call. */
@@ -128,6 +128,7 @@ function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { ac
     // Startup calls fail fast (keeping the sandbox quiet) while RPC posts are
     // recorded, so a test can assert which method the UI actually sent.
     fetch: (url, opts) => {
+      if (voiceRequest && (String(url).startsWith('/m/api/voice') || String(url).startsWith('/voice-mode') || String(url) === '/api/commands/list')) return voiceRequest(String(url), opts)
       if (String(url) === '/m/') {
         const call = { url: String(url), opts }
         uiCalls.push(call); (opts.method === 'HEAD' ? headCalls : uiGetCalls).push(call)
@@ -152,10 +153,10 @@ function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { ac
     Image: class { },
     DOMParser: class { parseFromString(source, type) { parseCalls.push({ source, type }); assert.equal(type, 'text/html'); return parsedShell(source) } },
     crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000', getRandomValues: (a) => a },
-    EventSource: class { constructor() { this.readyState = 0 } close() {} },
+    EventSource: class { constructor() { this.readyState = 0 } close() {} addEventListener(type, fn) { if (type === 'mode') queueMicrotask(() => fn({ data: '{"active":null,"ownerTabId":null}' })) } },
     addEventListener(t, fn) { if (!windowEvents.has(t)) windowEvents.set(t, []); windowEvents.get(t).push(fn) }, removeEventListener() {},
     console,
-    JSON, Math, Date: Clock, Set, Map, Array, Object, String, Number, Boolean, Promise, Error, RegExp, AbortController, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
+    btoa: value => Buffer.from(value, 'binary').toString('base64'), JSON, Math, Date: Clock, Set, Map, Array, Object, String, Number, Boolean, Promise, Error, RegExp, AbortController, AbortSignal, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
   }
   sandbox.window = sandbox
   sandbox.globalThis = sandbox
@@ -185,12 +186,1061 @@ function chatWithQueue(S, id, running = true) {
   return c
 }
 
+function asyncQuestionFixture({ reject = false, deferPost = false } = {}) {
+  const page = bootApp(), { S } = page.__dsh, c = chatWithQueue(S, 'clarification-session', false), calls = []
+  const question = { id: 'question-1', sessionId: c.id, question: '保存哪种格式？', options: ['MP4', 'MOV'], independentWork: '继续整理已有素材', createdAt: new Date().toISOString(), deadline: new Date(Date.now() - 1000).toISOString(), status: 'deferred' }
+  let complete
+  const original = page.fetch
+  page.fetch = (url, options) => {
+    if (!String(url).startsWith('/m/api/async-questions')) return original(url, options)
+    calls.push({ url, options })
+    if (options.method !== 'POST') return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, value: { items: [question] } }) })
+    if (reject) return Promise.reject(new Error('network response unknown'))
+    const result = () => { question.status = 'answered'; question.delivery = 'accepted'; question.answer = { id: JSON.parse(options.body).answerId, text: JSON.parse(options.body).answer, at: new Date().toISOString() }; return { ok: true, status: 200, json: async () => ({ ok: true, value: question }) } }
+    return deferPost ? new Promise(resolve => { complete = () => resolve(result()) }) : Promise.resolve(result())
+  }
+  const card = { dataset: { asyncQuestion: question.id } }
+  const tap = (selector, dataset = {}) => page.els.get('dock').dispatch('click', { target: { closest: value => value === '[data-async-question]' ? card : value === selector ? { dataset } : null } })
+  const type = text => page.els.get('dock').dispatch('input', { target: { closest: value => value === '[data-async-question]' ? card : value === '[data-async-input]' ? { value: text } : null } })
+  return { page, S, c, calls, question, tap, type, complete: () => complete() }
+}
+
+test('async clarification is a separate dock card with no default submission and keeps native approvals', async () => {
+  const v = asyncQuestionFixture(); v.S.asks.set('existing-approval', { id: 'existing-approval', s: v.c.id, title: '原生审批', tool: 'shell' })
+  await v.page.__dsh.loadAsyncQuestions(v.c.id)
+  assert.match(v.page.els.get('dock').innerHTML, /data-async-question/)
+  assert.match(v.page.els.get('dock').innerHTML, /你仍可稍后回答/)
+  assert.match(v.page.els.get('dock').innerHTML, /原生审批/)
+  assert.equal(v.calls.filter(c => c.options.method === 'POST').length, 0)
+  v.tap('[data-async-option]', { asyncOption: '1' })
+  assert.equal(v.calls.filter(c => c.options.method === 'POST').length, 0)
+  v.tap('[data-async-submit]'); await new Promise(r => setTimeout(r, 10))
+  const post = JSON.parse(v.calls.find(c => c.options.method === 'POST').options.body)
+  assert.equal(post.answer, 'MOV'); assert.ok(post.answerId)
+  assert.doesNotMatch(v.page.els.get('dock').innerHTML, /已答问题|data-async-question/)
+  assert.equal(v.S.asks.has('existing-approval'), true)
+  assert.equal(v.page.rpcCalls.length, 0)
+})
+
+test('clarification answer waits for explicit submit, deduplicates double click and retains per-question draft', async () => {
+  const v = asyncQuestionFixture({ deferPost: true }); await v.page.__dsh.loadAsyncQuestions(v.c.id)
+  v.type('先做 MP4，之后补 MOV')
+  chatWithQueue(v.S, 'other-clarification', false); v.S.cur = v.c.id
+  await v.page.__dsh.loadAsyncQuestions(v.c.id)
+  assert.match(v.page.els.get('dock').innerHTML, /先做 MP4，之后补 MOV/)
+  v.tap('[data-async-submit]'); v.tap('[data-async-submit]')
+  assert.equal(v.calls.filter(c => c.options.method === 'POST').length, 1)
+  v.complete(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.question.answer.text, '先做 MP4，之后补 MOV')
+  assert.doesNotMatch(v.page.els.get('dock').innerHTML, /\[object Object\]/)
+  assert.doesNotMatch(v.page.els.get('dock').innerHTML, /先做 MP4，之后补 MOV|已答问题|data-async-question/)
+})
+
+test('unknown clarification submission stays visible and polling never replays it', async () => {
+  const v = asyncQuestionFixture({ reject: true }); await v.page.__dsh.loadAsyncQuestions(v.c.id)
+  v.type('MP4'); v.tap('[data-async-submit]'); await new Promise(r => setTimeout(r, 10))
+  assert.match(v.page.els.get('dock').innerHTML, /回答发送状态待核对/)
+  assert.doesNotMatch(v.page.els.get('dock').innerHTML, /data-async-submit/)
+  v.S.status = 'online'; v.page.runInterval(5000); await new Promise(r => setTimeout(r, 10))
+  v.tap('[data-async-submit]'); v.tap('[data-async-refresh]'); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.calls.filter(c => c.options.method === 'POST').length, 1)
+  assert.equal(v.S.asyncDrafts[v.c.id + ':' + v.question.id].delivery, 'unknown')
+})
+
+test('pending clarification delivery stays unresolved while not-needed is a confirmed answer', async () => {
+  const v = asyncQuestionFixture()
+  v.question.status = 'answered'; v.question.answer = { id: 'answer-fixture', text: 'MP4', at: new Date().toISOString() }; v.question.delivery = 'pending'
+  await v.page.__dsh.loadAsyncQuestions(v.c.id)
+  assert.match(v.page.els.get('dock').innerHTML, /回答发送状态待核对/)
+  assert.doesNotMatch(v.page.els.get('dock').innerHTML, /已答问题/)
+  v.S.asyncDrafts[v.c.id + ':' + v.question.id] = { text: 'MP4', delivery: 'unknown', answerId: 'retained-id' }
+  v.question.delivery = 'not-needed'
+  await v.page.__dsh.loadAsyncQuestions(v.c.id)
+  assert.doesNotMatch(v.page.els.get('dock').innerHTML, /已答问题|data-async-question/)
+  assert.doesNotMatch(v.page.els.get('dock').innerHTML, /回答发送状态待核对/)
+})
+
+test('clarification poll refreshes a separate home badge without replacing native approval', async () => {
+  const v = asyncQuestionFixture(), session = v.S.byId[v.c.id]
+  session.w = 'workspace-fixture'; v.S.sessions = [session]; v.S.booted = true
+  v.S.asks.set('approval', { id: 'approval', s: v.c.id, title: '原生审批', tool: 'shell' })
+  await v.page.__dsh.loadAsyncQuestions(v.c.id); await new Promise(r => setTimeout(r, 10))
+  assert.equal(session.aq, 1)
+  assert.match(v.page.els.get('rows').innerHTML, /待补充 1/)
+  assert.match(v.page.els.get('rows').innerHTML, /待确认/)
+  v.question.status = 'answered'; v.question.delivery = 'not-needed'; v.question.answer = { id: 'a', text: 'MP4', at: new Date().toISOString() }
+  await v.page.__dsh.loadAsyncQuestions(v.c.id); await new Promise(r => setTimeout(r, 10))
+  assert.equal(session.aq, 0); assert.doesNotMatch(v.page.els.get('rows').innerHTML, /待补充/)
+  assert.match(v.page.els.get('rows').innerHTML, /待确认/)
+})
+
 test('app.js boots under a bare DOM and exposes the debug hook', () => {
   const sandbox = bootApp()
   assert.ok(sandbox.window.__dsh, '?debug must expose __dsh')
   assert.ok(sandbox.window.__dsh.S, 'debug hook carries the state')
   assert.equal(typeof sandbox.window.__dsh.onFrame, 'function')
   assert.equal(sandbox.window.__dsh.S.cur, null, 'nothing open on a cold start')
+})
+
+test('cancelled computer-folder picker in new conversation creates nothing and preserves current draft', async () => {
+  const page=bootApp(),c=chatWithQueue(page.__dsh.S,'existing-chat',false);page.els.get('input').value='未发送的现有草稿';
+  let choices=0;page.DSHFolderPicker={choose:async()=>{choices++;return null;}};
+  page.els.get('fab').onclick();assert.match(page.els.get('sheet').innerHTML,/浏览电脑文件夹/);
+  page.els.get('sheet').onclick({target:{closest:selector=>selector==='[data-browse-folder]'?{}:null}});await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(choices,1);assert.equal(page.__dsh.S.cur,c.id);assert.equal(page.els.get('input').value,'未发送的现有草稿');assert.equal(page.rpcCalls.length,0);
+});
+
+test('confirmed computer workspace enters the original session-create flow once without sending a prompt', async () => {
+  const page=bootApp({rpcResult:call=>({ok:true,value:call.method==='session.create'?{sessionId:'new-folder-chat'}:{accepted:true}})}),state=page.__dsh.S;
+  chatWithQueue(state,'previous-chat',false);page.els.get('input').value='原对话草稿';
+  page.DSHFolderPicker={choose:async()=>({id:'folder-workspace',workspaceId:'folder-workspace',title:'资料',path:'D:\\资料'})};
+  page.els.get('fab').onclick();const browse={};page.els.get('sheet').onclick({target:{closest:selector=>selector==='[data-browse-folder]'?browse:null}});
+  await new Promise(resolve=>setTimeout(resolve,5));assert.equal(page.rpcCalls.length,0,'creation waits for confirmed picker and sheet close');
+  page.dispatchWindow('popstate',{state:{v:'home',od:0}});await new Promise(resolve=>setTimeout(resolve,10));
+  const creates=page.rpcCalls.filter(call=>call.method==='session.create');assert.equal(creates.length,1);assert.equal(creates[0].payload.workspaceId,'folder-workspace');
+  assert.equal(state.cur,'new-folder-chat');assert.equal(state.drafts['previous-chat'],'原对话草稿');assert.equal(page.rpcCalls.some(call=>call.method==='session.prompt'),false);
+});
+
+function voicePage({ intercept } = {}) {
+  const calls = [], tracks = { getSettings: () => ({ echoCancellation: true }), stops: 0, stop() { this.stops++ } }, nodes = []
+  const page = bootApp({ voiceRequest: async (url, options) => {
+    calls.push({ url, options })
+    if (intercept) { const response = intercept(url, options); if (response) return response }
+    const value = url.startsWith('/m/api/voice') ? { ok: true, value: url.includes('?') ? { items: [] } : JSON.parse(options.body) } : url.includes('vadOnly=1') ? { isSpeech: true } : url === '/api/commands/list' ? { result: { ok: true, value: [] } } : url.includes('/asr?') ? { text: '这是录音转成的文字。' } : { active: 'voice-test' }
+    return { ok: true, json: async () => value }
+  } })
+  page.navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [tracks] }) }
+  page.AudioContext = class {
+    sampleRate = 48000
+    destination = {}
+    resume() { return Promise.resolve() }
+    close() { return Promise.resolve() }
+    createMediaStreamSource() { return { connect() {}, disconnect() {} } }
+    createScriptProcessor() { const node = { connect() {}, disconnect() {}, onaudioprocess: null }; nodes.push(node); return node }
+    createGain() { return { gain: { value: 1 }, connect() {} } }
+    decodeAudioData() { return Promise.resolve({ duration: 1, sampleRate: 16000, getChannelData: () => new Float32Array(16000) }) }
+    createBufferSource() { const n = { connect() {}, start() {}, stop() { if (n.onended) n.onended() } }; players.push(n); return n }
+  }
+  const players = [], events = {}
+  page.atob = value => Buffer.from(value, 'base64').toString('binary')
+  page.EventSource = class {
+    close() {}
+    addEventListener(type, fn) { events[type] = fn; if (type === 'mode') queueMicrotask(() => fn({ data: '{"active":null,"ownerTabId":null}' })) }
+  }
+  const { S } = page.window.__dsh
+  const chat = chatWithQueue(S, 'voice-test', false)
+  const start = mode => page.__dsh.startVoice(mode)
+  return { page, S, chat, start, calls, tracks, nodes, players, emit(type, data) { events[type]?.({ data: JSON.stringify({ sessionId: 'voice-test', ...data }) }) } }
+}
+
+test('voice message stores original PCM WAV before sending and never fills composer', async () => {
+  const v = voicePage(); v.start('chat'); await new Promise(r => setTimeout(r, 10))
+  v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.25) } })
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 15))
+  const post = v.calls.find(c => c.url === '/m/api/voice')
+  assert.ok(post)
+  const item = JSON.parse(post.options.body), audio = Buffer.from(item.audio, 'base64')
+  assert.equal(audio.subarray(0, 4).toString(), 'RIFF')
+  assert.equal(audio.readInt16LE(44), 8191, 'the recorded voice, not synthesized transcript')
+  assert.equal(item.role, 'user'); assert.equal(item.mime, 'audio/wav')
+  assert.equal(v.page.rpcCalls.find(c => c.method === 'session.prompt').rpcId, item.requestId)
+  assert.equal(v.page.els.get('input').value, '')
+  assert.equal(v.page.els.has('voiceHistory'), false, 'no separate voice history entry')
+  v.page.els.get('voiceEnd').onclick()
+})
+
+test('failed voice persistence keeps original audio and explicit retry reuses id before one prompt', async () => {
+  let failures = 1
+  const v = voicePage({ intercept: (url) => url === '/m/api/voice' && failures-- > 0 ? Promise.reject(new Error('offline')) : null })
+  v.start('chat'); await new Promise(r => setTimeout(r, 10))
+  v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.2) } })
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0)
+  assert.equal(v.page.els.get('voiceFinish').textContent, '重试发送')
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  const posts = v.calls.filter(c => c.url === '/m/api/voice').map(c => c.options.body)
+  assert.equal(posts.length, 2); assert.equal(posts[0], posts[1])
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 1)
+  v.page.els.get('voiceEnd').onclick()
+})
+
+test('assistant audio is persisted with reply linkage and transcript', async () => {
+  const v = voicePage(); v.start('chat'); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  v.emit('audio', { audio: 'YQ==', sentenceId: 1 })
+  v.emit('audio', { text: '这是语音回复', final: true, sentenceId: 1 })
+  await new Promise(r => setTimeout(r, 10))
+  const items = v.calls.filter(c => c.url === '/m/api/voice').map(c => JSON.parse(c.options.body))
+  assert.equal(items.length, 2); assert.equal(items[1].role, 'assistant')
+  assert.equal(items[1].replyTo, items[0].id); assert.equal(items[1].text, '这是语音回复')
+  assert.equal(items[1].audio, 'YQ==', 'preserve encoded reply byte for byte without AudioContext conversion')
+  v.page.els.get('voiceEnd').onclick()
+})
+
+test('failed encoded reply survives hangup and next-turn reset until explicit save retry', async () => {
+  for (const action of ['voiceEnd', 'voiceFinish']) {
+    let fail = true
+    const v = voicePage({ intercept: (url, options) => {
+      if (url === '/m/api/voice' && JSON.parse(options.body).role === 'assistant' && fail) return Promise.reject(new Error('offline'))
+    } })
+    v.start('chat'); await new Promise(r => setTimeout(r, 10))
+    v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+    v.emit('audio', { audio: 'SUQzZmFrZW1wMw==', mime: 'audio/mpeg', sentenceId: 1 })
+    v.emit('audio', { text: '未保存的回复', mime: 'audio/mpeg', final: true, sentenceId: 1 })
+    await new Promise(r => setTimeout(r, 10))
+    assert.equal(v.page.els.get('voiceRetryReplies').hidden, false)
+    v.page.els.get(action).onclick(); await new Promise(r => setTimeout(r, 10))
+    let posts = v.calls.filter(c => c.url === '/m/api/voice' && JSON.parse(c.options.body).role === 'assistant')
+    assert.equal(posts.length, 1, 'no implicit retry on reset or hangup')
+    fail = false; v.page.els.get('voiceRetryReplies').onclick(); await new Promise(r => setTimeout(r, 10))
+    posts = v.calls.filter(c => c.url === '/m/api/voice' && JSON.parse(c.options.body).role === 'assistant')
+    assert.equal(posts.length, 2); assert.equal(posts[0].options.body, posts[1].options.body)
+    assert.equal(JSON.parse(posts[1].options.body).mime, 'audio/mpeg')
+    assert.equal(v.page.els.get('voiceRetryReplies').hidden, true)
+    if (action === 'voiceFinish') v.page.els.get('voiceEnd').onclick()
+  }
+})
+
+test('inline voice links identical text by request id and replyTo, including unknown orphan', async () => {
+  const items = [
+    { id: 'u1', role: 'user', requestId: 'rid1', text: '相同问题', durationMs: 1000 },
+    { id: 'a1', role: 'assistant', requestId: 'rid1', replyTo: 'u1', text: '相同回答', segmentIds: ['s1', 's2'], durationMs: 2000 },
+    { id: 'u2', role: 'user', requestId: 'rid2', text: '相同问题', durationMs: 1000 },
+    { id: 'a2', role: 'assistant', requestId: 'rid2', replyTo: 'u2', text: '相同回答', segmentIds: ['s3'], durationMs: 0 },
+    { id: 'unknown', role: 'user', requestId: 'unknown-rid', text: '未确认录音', durationMs: 0 }
+  ]
+  const v = voicePage({ intercept: url => url.startsWith('/m/api/voice?') ? Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { items } }) }) : null })
+  v.chat.voiceUnknown = new Set(['unknown-rid'])
+  v.chat.items = [{ k: 'u', seq: 1, rid: 'rid1', text: '相同问题' }, { k: 'a', seq: 2, text: '相同回答' }, { k: 'end', seq: 3, reason: 'completed' }, { k: 'u', seq: 4, rid: 'rid2', text: '相同问题' }, { k: 'a', seq: 5, text: '相同回答' }, { k: 'end', seq: 6, reason: 'completed' }]
+  await v.page.__dsh.loadVoiceHistory('voice-test')
+  const html = v.page.els.get('msgs').innerHTML
+  const firstTurn = html.slice(html.indexOf('data-message-seq="2"'), html.indexOf('data-message-seq="5"')), secondTurn = html.slice(html.indexOf('data-message-seq="5"'))
+  assert.match(firstTurn, /data-voice-id="a1"/); assert.doesNotMatch(firstTurn, /data-voice-id="a2"/)
+  assert.match(secondTurn, /data-voice-id="a2"/); assert.doesNotMatch(secondTurn, /data-voice-id="a1"/)
+  assert.equal((html.match(/相同问题/g) || []).length, 2)
+  assert.equal((html.match(/相同回答/g) || []).length, 2)
+  assert.equal((html.match(/data-voice-id="a1"/g) || []).length, 1)
+  assert.match(html, /group=1/); assert.match(html, /发送状态未确认/)
+  assert.doesNotMatch(html, /voice-unmatched/)
+})
+
+test('inline voice refresh defers repaint during playback and retains paused audio node', async () => {
+  let items = [{ id: 'u1', role: 'user', requestId: 'r1', text: '录音', durationMs: 0 }]
+  const v = voicePage({ intercept: url => url.startsWith('/m/api/voice?') ? Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { items } }) }) : null })
+  v.chat.items = [{ k: 'u', seq: 1, rid: 'r1', text: '录音' }]
+  await v.page.__dsh.loadVoiceHistory('voice-test')
+  const msgs = v.page.els.get('msgs'), initial = msgs.innerHTML
+  const audio = { dataset: { session: 'voice-test', voiceId: 'u1', voiceRevision: '' }, paused: false, ended: false, currentTime: 0.5 }
+  msgs.querySelectorAll = selector => selector === 'audio[data-voice-id]' ? [audio] : []
+  items = items.concat({ id: 'u2', role: 'user', requestId: 'r2', text: '新录音', durationMs: 0 })
+  await v.page.__dsh.loadVoiceHistory('voice-test')
+  assert.equal(msgs.innerHTML, initial, 'playing audio never detached')
+  assert.equal(v.chat.voiceRepaint, true)
+  let kept
+  audio.paused = true
+  audio.parentNode = { replaceChild(previous) { kept = previous } }
+  v.page.__dsh.renderMsgs(v.chat)
+  assert.equal(kept, audio); assert.equal(audio.currentTime, 0.5)
+  assert.match(msgs.innerHTML, /新录音/)
+})
+
+test('older-page voice records stay at the top pagination entry without any bottom players', async () => {
+  const v = voicePage()
+  v.chat.hasMore = true
+  v.chat.items = [{ k: 'u', rid: 'recent', seq: 1, text: '现在的问题' }, { k: 'a', seq: 2, text: '现在的回答' }, { k: 'end', seq: 3, reason: 'completed' }]
+  v.chat.voiceItems = [{ id: 'old-user', role: 'user', requestId: 'older-page', text: '较早的真实对话' }, { id: 'old-reply', role: 'assistant', requestId: 'older-page', replyTo: 'old-user', text: '较早回复' }]
+  const original = JSON.stringify(v.chat.items.map(({ k, seq, rid, text, reason }) => ({ k, seq, rid, text, reason })))
+  v.page.__dsh.renderMsgs(v.chat)
+  const msgs = v.page.els.get('msgs'), html = msgs.innerHTML
+  assert.doesNotMatch(html, /data-voice-id="old-user"/)
+  assert.match(v.page.els.get('older').innerHTML, /2 条语音记录/)
+  assert.match(v.page.els.get('older').innerHTML, /data-older/)
+  assert.doesNotMatch(html, /发送状态未确认/)
+  assert.equal(JSON.stringify(v.chat.items.map(({ k, seq, rid, text, reason }) => ({ k, seq, rid, text, reason }))), original)
+  v.chat.hasMore = false
+  v.page.__dsh.renderMsgs(v.chat)
+  assert.match(msgs.innerHTML, /^<details class="voice-unmatched" data-voice-unmatched>/)
+  assert.match(msgs.innerHTML, /较早的真实对话/)
+})
+
+test('seven old recordings migrate into their original turns across two history pages', () => {
+  const v = voicePage(), turns = index => [{ k: 'u', rid: 'rid-' + index, seq: index * 3, text: '问题' + index }, { k: 'a', seq: index * 3 + 1, text: '回复' + index }, { k: 'end', seq: index * 3 + 2, reason: 'completed' }]
+  v.chat.voiceItems = Array.from({ length: 4 }, (_, n) => ({ id: 'u-' + n, role: 'user', requestId: 'rid-' + n, text: '问题' + n })).concat(Array.from({ length: 3 }, (_, n) => ({ id: 'a-' + n, role: 'assistant', requestId: 'rid-' + n, replyTo: 'u-' + n, text: '回复' + n })))
+  v.chat.hasMore = true; v.chat.items = turns(9)
+  v.page.__dsh.renderMsgs(v.chat)
+  assert.match(v.page.els.get('older').innerHTML, /7 条语音记录/)
+  assert.doesNotMatch(v.page.els.get('msgs').innerHTML, /data-voice-id=/)
+  v.chat.items = turns(3).concat(turns(9)); v.page.__dsh.renderMsgs(v.chat)
+  assert.match(v.page.els.get('older').innerHTML, /6 条语音记录/)
+  assert.equal((v.page.els.get('msgs').innerHTML.match(/data-voice-id=/g) || []).length, 1)
+  v.chat.hasMore = false; v.chat.items = [0, 1, 2, 3, 9].flatMap(turns); v.page.__dsh.renderMsgs(v.chat)
+  assert.equal((v.page.els.get('msgs').innerHTML.match(/data-voice-id=/g) || []).length, 7)
+  assert.doesNotMatch(v.page.els.get('msgs').innerHTML, /voice-unmatched/)
+  assert.equal(v.page.els.get('older').innerHTML, '')
+})
+
+test('running reply audio stays beside its matched user before a final text item arrives', () => {
+  const v = voicePage()
+  v.chat.hasMore = true; v.S.run.add(v.chat.id)
+  v.chat.items = [{ k: 'u', seq: 4, rid: 'live-rid', text: '正在问' }]
+  v.chat.voiceItems = [{ id: 'live-u', role: 'user', requestId: 'live-rid', text: '正在问' }, { id: 'live-a', role: 'assistant', requestId: 'live-rid', replyTo: 'live-u', text: '回答正在生成' }]
+  v.page.__dsh.renderMsgs(v.chat)
+  assert.match(v.page.els.get('msgs').innerHTML, /data-voice-id="live-a"/)
+  assert.match(v.page.els.get('msgs').innerHTML, /回复文字正在同步/)
+  assert.doesNotMatch(v.page.els.get('older').innerHTML, /语音记录/)
+})
+
+test('recent explicitly unsent audio remains visible even when older history is unloaded', () => {
+  const v = voicePage(); v.chat.hasMore = true
+  v.chat.voiceUnknown = new Set(['unknown-rid']); v.chat.voiceNotSent = new Set(['muted-rid'])
+  v.chat.voiceItems = [{ id: 'unknown', role: 'user', requestId: 'unknown-rid', text: '刚才发送待核对' }, { id: 'muted', role: 'user', requestId: 'muted-rid', text: '刚才静音取消' }, { id: 'old', role: 'user', requestId: 'old-rid', text: '更早录音' }]
+  v.page.__dsh.renderMsgs(v.chat)
+  const html = v.page.els.get('msgs').innerHTML
+  assert.match(html, /data-voice-id="unknown"/); assert.match(html, /data-voice-id="muted"/)
+  assert.doesNotMatch(html, /data-voice-id="old"/)
+  assert.match(v.page.els.get('older').innerHTML, /1 条语音记录/)
+  assert.match(html, /发送状态未确认/); assert.match(html, /因静音未发送/)
+})
+
+test('overlapping history page boundaries do not duplicate native users or voice bubbles', async () => {
+  const v = voicePage()
+  const user = { k: 'u', seq: 3, rid: 'r3', text: '页边界问题' }
+  v.chat.items = [user, { k: 'a', seq: 4, text: '页边界回复' }, { k: 'end', seq: 5, reason: 'completed' }]
+  v.chat.firstSeq = 3; v.chat.hasMore = true
+  v.chat.voiceItems = [{ id: 'u3', role: 'user', requestId: 'r3', text: '页边界问题' }]
+  const original = v.page.fetch
+  v.page.fetch = (url, options) => String(url).startsWith('/m/api/history?') ? Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, value: { items: [{ k: 'a', seq: 1, text: '较早回复' }, { k: 'end', seq: 2, reason: 'completed' }, user], firstSeq: 1, hasMore: false } }) }) : original(url, options)
+  v.page.els.get('scroller').dispatch('click', { target: { closest: selector => selector === '[data-older]' ? {} : null } })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.chat.items.filter(item => item.seq === 3).length, 1)
+  assert.equal((v.page.els.get('msgs').innerHTML.match(/data-voice-id="u3"/g) || []).length, 1)
+})
+
+test('speaker preview exposes server failure beside the player and never selects the voice', async () => {
+  const v = voicePage({ intercept: (url) => url === '/voice-mode/speakers' ? Promise.resolve({ ok: true, json: async () => ({ current: 'suyingxue', rate: 1, items: [{ id: 'kokoro:48', name: '女声084', gender: 'F', ready: true }] }) }) : url === '/voice-mode/preview' ? Promise.resolve({ ok: false, json: async () => ({ error: '音色加载失败' }) }) : null })
+  v.page.els.get('mic').onclick()
+  v.page.els.get('sheet').onclick({ target: { closest: selector => selector === '[data-speaker-settings]' ? {} : null } })
+  await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('sheet').onclick({ target: { closest: selector => selector === '[data-speaker-preview]' ? { dataset: { speakerPreview: 'kokoro:48' } } : null } })
+  await new Promise(r => setTimeout(r, 10))
+  assert.match(v.page.els.get('speakerPreview').children[0].children[0].textContent, /试听失败：音色加载失败/)
+  assert.equal(v.calls.filter(c => c.url === '/voice-mode/speakers' && c.options.method === 'POST').length, 0)
+})
+
+test('slow speaker preview shows preparation beside the clicked row and aborts when hidden', async () => {
+  let finishPreview, previewSignal
+  const v = voicePage({ intercept: (url, options) => url === '/voice-mode/speakers' ? Promise.resolve({ ok: true, json: async () => ({ current: 'suyingxue', rate: 1, items: [{ id: 'kokoro:48', name: '女声084', gender: 'F', ready: true }] }) }) : url === '/voice-mode/preview' ? (previewSignal = options.signal, new Promise(resolve => { finishPreview = resolve })) : null })
+  v.page.els.get('mic').onclick()
+  v.page.els.get('sheet').onclick({ target: { closest: selector => selector === '[data-speaker-settings]' ? {} : null } })
+  await new Promise(r => setTimeout(r, 10))
+  const row = makeEl('div'), button = { dataset: { speakerPreview: 'kokoro:48' }, closest: selector => selector === '.speaker-row' ? row : null }
+  v.page.els.get('sheet').onclick({ target: { closest: selector => selector === '[data-speaker-preview]' ? button : null } })
+  assert.equal(row.children.length, 1, 'feedback goes next to tapped voice, not below all 13 choices')
+  assert.match(row.children[0].children[0].textContent, /正在合成试听/)
+  assert.equal(button.disabled, true)
+  assert.equal(row.children[0].children[1].hidden, true)
+  v.page.document.visibilityState = 'hidden'; v.page.dispatchDocument('visibilitychange')
+  assert.equal(previewSignal.aborted, true); assert.equal(button.disabled, false)
+  finishPreview({ ok: true, blob: async () => ({}) }); await new Promise(r => setTimeout(r, 10))
+  assert.equal(row.children[0].children[1].hidden, true, 'late response cannot start audio')
+})
+
+test('call interruption confirms speech and preserves the first samples through cancellation', async () => {
+  const v = voicePage(); v.start('call'); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  const feed = () => v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.3) } })
+  for (let n = 0; n < 2; n++) { feed(); await new Promise(r => setTimeout(r, 5)) }
+  assert.equal(v.calls.filter(c => c.url === '/voice-mode/cancel').length, 0)
+  feed(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.calls.filter(c => c.url === '/voice-mode/cancel').length, 1)
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  const wavs = v.calls.filter(c => c.url === '/m/api/voice').map(c => JSON.parse(c.options.body))
+  assert.ok(Buffer.from(wavs[1].audio, 'base64').readInt16LE(44) > 9000)
+  assert.equal(v.page.els.get('callPanel').hidden, false)
+  v.page.els.get('callHangup').onclick(); assert.equal(v.tracks.stops, 1)
+  assert.equal(v.page.els.get('callPanel').hidden, true)
+})
+
+test('hangup reconciles native history when terminal stream frames were missed', async () => {
+  const v = voicePage(); v.start('call'); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  const requestId = JSON.parse(v.calls.find(c => c.url === '/m/api/voice').options.body).requestId
+  const original = v.page.fetch; let reads = 0
+  v.page.fetch = (url, options) => String(url).startsWith('/m/api/history?') ? (++reads, Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, value: { items: [{ k: 'u', seq: 1, rid: requestId, text: '通话问题' }, { k: 'a', seq: 2, text: '已结束的通话回复' }, { k: 'end', seq: 3, reason: 'completed' }], partial: null, lastSeq: 3, firstSeq: 1, hasMore: false, run: false } }) })) : original(url, options)
+  assert.equal(v.S.run.has('voice-test'), true, 'client still thinks the sent turn is running')
+  v.page.els.get('callHangup').onclick(); await new Promise(r => setTimeout(r, 20))
+  assert.equal(reads, 1, 'hangup must reconcile the durable transcript')
+  assert.equal(v.S.run.has('voice-test'), false)
+  assert.match(v.page.els.get('msgs').innerHTML, /已结束的通话回复/)
+  assert.equal(v.chat.pending.length, 0, 'durable request rid removes stale pending bubble')
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 1)
+})
+
+test('call metadata groups its turns into one transcript locator without repeating text', async () => {
+  const v = voicePage(); let serial = 1
+  v.page.crypto.randomUUID = () => '00000000-0000-4000-8000-' + String(serial++).padStart(12, '0')
+  v.start('call'); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  const turns = v.calls.filter(c => c.url === '/m/api/voice').map(c => JSON.parse(c.options.body))
+  assert.equal(turns.length, 2); assert.equal(turns[0].mode, 'call')
+  assert.equal(turns[0].callId, turns[1].callId); assert.equal(turns[0].callStartedAt, turns[1].callStartedAt)
+  v.chat.voiceItems = turns
+  v.chat.items = turns.flatMap((item, index) => [{ k: 'u', seq: index * 3, rid: item.requestId, text: '通话问题' + index }, { k: 'a', seq: index * 3 + 1, text: '通话回复' + index }, { k: 'end', seq: index * 3 + 2, reason: 'completed' }])
+  v.chat.pending = []; v.S.run.delete('voice-test')
+  v.page.__dsh.renderMsgs(v.chat)
+  const html = v.page.els.get('msgs').innerHTML
+  assert.equal((html.match(/data-call-locate=/g) || []).length, 1)
+  assert.match(html, /2轮对话/); assert.equal((html.match(/通话问题0/g) || []).length, 1)
+  v.page.els.get('callHangup').onclick()
+})
+
+test('unconfirmed AEC retains the longer echo tail before automatic continuation', async () => {
+  const v = voicePage(); v.tracks.getSettings = () => ({ echoCancellation: false })
+  v.start('call'); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  v.emit('turn', { state: 'agent-speaking' }); v.emit('turn', { state: 'listening' })
+  v.page.__dsh.onFrame({ t: 'run', s: 'voice-test', on: false })
+  v.page.fireTimeouts(250); await new Promise(r => setTimeout(r, 5))
+  assert.equal(v.calls.filter(c => c.url === '/voice-mode/cancel').length, 0)
+  v.page.fireTimeouts(600); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.calls.filter(c => c.url === '/voice-mode/cancel').length, 1)
+  v.page.els.get('callHangup').onclick()
+})
+
+test('mute and hangup reject late VAD and never submit a new turn', async () => {
+  for (const action of ['callMute', 'callHangup']) {
+    let resolveDetect
+    const v = voicePage({ intercept: url => url.includes('vadOnly=1') ? new Promise(resolve => { resolveDetect = resolve }) : null })
+    v.start('call'); await new Promise(r => setTimeout(r, 10))
+    v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+    v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.3) } })
+    v.page.els.get(action).onclick()
+    resolveDetect({ ok: true, json: async () => ({ isSpeech: true }) }); await new Promise(r => setTimeout(r, 10))
+    assert.equal(v.calls.filter(c => c.url === '/voice-mode/cancel').length, 0)
+    assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 1)
+    if (action === 'callMute') { assert.equal(v.tracks.enabled, false); v.page.els.get('callHangup').onclick() }
+  }
+})
+
+test('speaker settings reads choices without changing voice until an explicit selection', async () => {
+  const v = voicePage({ intercept: (url, options) => url === '/voice-mode/speakers' ? Promise.resolve({ ok: true, json: async () => options.method === 'POST' ? { ok: true, voice: 'gunian', rate: 1 } : { engine: 'vits', current: 'suyingxue', rate: 1, items: [{ id: 'suyingxue', name: '素映雪', gender: 'F', ready: true, latencyHint: '响应较快' }, { id: 'kokoro:48', name: '中文女声084', gender: 'F', ready: true, latencyHint: '合成较慢，适合语音消息' }, { id: 'gunian', name: '顾念', gender: 'M', ready: true }] } }) : null })
+  v.page.els.get('mic').onclick()
+  assert.equal((v.page.els.get('sheet').innerHTML.match(/data-voice=/g) || []).length, 3)
+  v.page.els.get('sheet').onclick({ target: { closest: selector => selector === '[data-speaker-settings]' ? {} : null } })
+  await new Promise(r => setTimeout(r, 10))
+  assert.match(v.page.els.get('sheet').innerHTML, /素映雪/)
+  assert.match(v.page.els.get('sheet').innerHTML, /speaker-options/)
+  assert.match(v.page.els.get('sheet').innerHTML, /合成较慢，适合语音消息/)
+  assert.match(v.page.els.get('sheet').innerHTML, /响应较快/)
+  assert.equal(v.calls.filter(c => c.url === '/voice-mode/speakers' && c.options.method === 'POST').length, 0)
+  v.page.els.get('sheet').onclick({ target: { closest: selector => selector === '[data-speaker]' ? { dataset: { speaker: 'gunian' } } : null } })
+  await new Promise(r => setTimeout(r, 10))
+  assert.deepEqual(JSON.parse(v.calls.find(c => c.url === '/voice-mode/speakers' && c.options.method === 'POST').options.body), { voice: 'gunian' })
+})
+
+test('three modes separate manual messages from silence-triggered live calls', async () => {
+  for (const mode of ['draft', 'chat', 'call']) {
+    const v = voicePage(); v.start(mode); await new Promise(r => setTimeout(r, 10))
+    const toggle = v.calls.find(c => c.url === '/voice-mode/toggle' && JSON.parse(c.options.body).on)
+    assert.equal(JSON.parse(toggle.options.body).mode, mode === 'chat' ? 'message' : mode)
+    const feed = level => v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(level) } })
+    feed(0.1)
+    for (let i = 0; i < 20; i++) feed(0)
+    await new Promise(r => setTimeout(r, 10))
+    assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, mode === 'call' ? 1 : 0, mode)
+    v.page.els.get('voiceEnd').onclick()
+  }
+})
+
+function holdUi(v, mode) {
+  v.page.els.get('mic').onclick()
+  v.page.els.get('sheet').onclick({ target: { closest: selector => selector === '[data-voice]' ? { dataset: { voice: mode } } : null } })
+  const button = v.page.els.get('holdTalk'), event = { pointerId: 7, button: 0, clientY: 200, preventDefault() {} }
+  return { button, down() { button.onpointerdown(event) }, up() { button.onpointerup(event) }, cancel() { button.onpointercancel(event) }, move(y) { button.onpointermove({ ...event, clientY: y }) }, feed(n = 8) { for (let i = 0; i < n; i++) v.nodes.at(-1).onaudioprocess?.({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.1) } }) } }
+}
+
+test('voice message menu does not record until pressed; release sends one original voice', async () => {
+  for (const mode of ['chat']) {
+    const v = voicePage(), hold = holdUi(v, mode)
+    assert.equal(v.nodes.length, 0)
+    assert.equal(v.page.els.get('mic').hidden, true)
+    assert.equal(hold.button.textContent, '按住说话')
+    hold.down(); await new Promise(r => setTimeout(r, 10)); hold.feed(); hold.up(); hold.up()
+    await new Promise(r => setTimeout(r, 15))
+    assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, mode === 'chat' ? 1 : 0)
+    assert.equal(v.tracks.stops, 1)
+    assert.equal(v.page.els.get('mic').classList.contains('recording'), false, 'released capture must not still advertise recording')
+    assert.doesNotMatch(v.page.els.get('voiceState').textContent, /点“继续说”|说完发送/)
+    if (mode === 'draft') { assert.equal(v.page.els.get('input').hidden, false); assert.match(v.page.els.get('input').value, /录音转成/); assert.equal(hold.button.hidden, true) }
+    else { const item = JSON.parse(v.calls.find(c => c.url === '/m/api/voice').options.body); assert.ok(Buffer.from(item.audio, 'base64').length > 44); v.page.dshStopVoice() }
+  }
+})
+
+test('voice message swipe, pointercancel, lost capture and background cancel without sending', async () => {
+  for (const action of ['swipe', 'cancel', 'lost', 'background']) {
+    const v = voicePage();
+    const hold = holdUi(v, 'chat'); hold.down(); await new Promise(r => setTimeout(r, 10)); hold.feed(14)
+    await new Promise(r => setTimeout(r, 5))
+    if (action === 'swipe') { hold.move(100); assert.equal(hold.button.textContent, '松开取消'); hold.up() }
+    if (action === 'cancel') hold.cancel()
+    if (action === 'lost') hold.button.onlostpointercapture({ pointerId: 7 })
+    if (action === 'background') { v.page.document.visibilityState = 'hidden'; v.page.dispatchDocument('visibilitychange') }
+    await new Promise(r => setTimeout(r, 10))
+    assert.equal(v.page.els.get('input').value, '', action)
+    assert.equal(v.page.rpcCalls.length, 0, action)
+    assert.equal(v.calls.filter(c => c.url.includes('final=1')).length, 0, action)
+    assert.equal(v.tracks.stops, 1, action)
+  }
+})
+
+test('release before microphone permission and short press discard audio; late permission is released', async () => {
+  const v = voicePage(); let grant
+  v.page.navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { grant = resolve })
+  const hold = holdUi(v, 'chat'); hold.down(); await new Promise(r => setTimeout(r, 5)); hold.up()
+  grant({ getTracks: () => [v.tracks] }); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.tracks.stops, 1); assert.equal(v.page.rpcCalls.length, 0)
+  const short = voicePage(), shortHold = holdUi(short, 'chat'); shortHold.down(); await new Promise(r => setTimeout(r, 10)); shortHold.feed(2); shortHold.up()
+  await new Promise(r => setTimeout(r, 10)); assert.equal(short.page.rpcCalls.length, 0); assert.equal(short.calls.some(c => c.url === '/m/api/voice'), false)
+})
+
+test('hold recording limit finishes once and later pointerup cannot submit twice', async () => {
+  const v = voicePage(), hold = holdUi(v, 'chat'); hold.down(); await new Promise(r => setTimeout(r, 10))
+  for (let n = 0; n < 650 && v.nodes[0].onaudioprocess; n++) hold.feed(1)
+  hold.up(); await new Promise(r => setTimeout(r, 40))
+  assert.equal(v.calls.filter(c => c.url.includes('final=1')).length, 1)
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 1)
+  v.page.dshStopVoice()
+})
+
+test('hold voice message waits for reply completion, then accepts another held message', async () => {
+  const v = voicePage(), hold = holdUi(v, 'chat'); hold.down(); await new Promise(r => setTimeout(r, 10)); hold.feed(); hold.up()
+  await new Promise(r => setTimeout(r, 10)); assert.equal(hold.button.disabled, true)
+  v.emit('turn', { state: 'agent-speaking' }); v.page.__dsh.onFrame({ t: 'run', s: v.chat.id, on: false })
+  assert.equal(hold.button.disabled, true, 'model end alone cannot cut off pending speech')
+  v.emit('turn', { state: 'listening' }); v.emit('tts-state', { busy: false })
+  assert.equal(hold.button.disabled, false)
+  hold.down(); await new Promise(r => setTimeout(r, 10)); hold.feed(); hold.up(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 2)
+  v.page.els.get('voiceKeyboard').onclick()
+  assert.equal(v.page.els.get('input').hidden, false); assert.equal(v.page.els.get('mic').hidden, false)
+})
+
+test('voice bubble keeps encoded media hidden behind a waveform button and expandable text', () => {
+  const v = voicePage()
+  v.chat.items = [{ k: 'u', seq: 1, rid: 'r1', text: '我的转写' }, { k: 'a', seq: 2, text: '回复转写' }, { k: 'end', seq: 3, reason: 'completed' }]
+  v.chat.voiceItems = [{ id: 'u1', role: 'user', requestId: 'r1', text: '我的转写', durationMs: 2400 }, { id: 'a1', role: 'assistant', requestId: 'r1', replyTo: 'u1', text: '回复转写', durationMs: 3600 }]
+  v.page.__dsh.renderMsgs(v.chat)
+  const html = v.page.els.get('msgs').innerHTML
+  assert.equal((html.match(/<audio hidden/g) || []).length, 2)
+  assert.doesNotMatch(html, /<audio[^>]* controls/)
+  assert.equal((html.match(/data-voice-play=/g) || []).length, 2)
+  assert.match(html, /data-voice-transcript="u1" hidden>/)
+  assert.match(html, /data-voice-transcript="reply:u1" hidden>/)
+})
+
+test('custom voice play buttons play or pause only one message at a time', async () => {
+  const v = voicePage(), audios = [], buttons = []
+  for (let index = 0; index < 2; index++) {
+    const button = makeEl('button'), icon = { textContent: '' }
+    const audio = { paused: true, ended: false, play() { this.paused = false; return Promise.resolve() }, pause() { this.paused = true }, closest() { return box } }
+    const box = { querySelector: selector => selector === 'audio[data-voice-id]' ? audio : selector === '[data-voice-play]' ? button : null }
+    button.closest = () => box; button.querySelector = () => icon
+    audios.push(audio); buttons.push(button)
+  }
+  v.page.els.get('msgs').querySelectorAll = selector => selector === 'audio[data-voice-id]' ? audios : []
+  const tap = button => v.page.els.get('scroller').dispatch('click', { target: { closest: selector => selector === '[data-voice-play]' ? button : null } })
+  tap(buttons[0]); await new Promise(r => setTimeout(r, 5)); assert.equal(audios[0].paused, false)
+  tap(buttons[1]); await new Promise(r => setTimeout(r, 5)); assert.equal(audios[0].paused, true); assert.equal(audios[1].paused, false)
+  tap(buttons[1]); assert.equal(audios[1].paused, true)
+})
+
+test('message reply hides its native final text until menu reveal even before TTS arrives', () => {
+  const v = voicePage()
+  v.chat.items = [{ k: 'u', seq: 1, rid: 'r1', text: '语音提问' }, { k: 'a', seq: 2, text: '完整回复不能提前铺满屏幕。' }, { k: 'end', seq: 3, reason: 'completed' }]
+  v.chat.voiceItems = [{ id: 'u1', role: 'user', requestId: 'r1', mode: 'message', text: '语音提问' }]
+  v.page.__dsh.renderMsgs(v.chat)
+  let html = v.page.els.get('msgs').innerHTML
+  assert.match(html, /正在生成语音/)
+  assert.match(html, /data-voice-transcript="reply:u1" hidden><div class="md"><p>完整回复/)
+  assert.doesNotMatch(html, /<summary>文字/)
+  v.chat.voiceTextOpen = new Set(['reply:u1'])
+  v.chat.voiceItems.push({ id: 'a1', role: 'assistant', requestId: 'r1', replyTo: 'u1', mode: 'message', text: '完整回复不能提前铺满屏幕。' })
+  v.page.__dsh.renderMsgs(v.chat); html = v.page.els.get('msgs').innerHTML
+  assert.doesNotMatch(html, /正在生成语音/)
+  assert.match(html, /data-voice-transcript="reply:u1"><div/)
+  v.chat.voiceItems = [v.chat.voiceItems[0]]; v.chat.voiceItems[0].mode = 'call'
+  v.page.__dsh.renderMsgs(v.chat)
+  assert.doesNotMatch(v.page.els.get('msgs').innerHTML, /正在生成语音/)
+})
+
+test('user voice uses its compact container while ordinary text keeps the original bubble', () => {
+  const v = voicePage()
+  v.chat.items = [{ k: 'u', seq: 1, rid: 'audio-request', text: '语音转写' }, { k: 'u', seq: 2, rid: 'text-request', text: '普通文字' }]
+  v.chat.voiceItems = [{ id: 'audio', role: 'user', mode: 'message', requestId: 'audio-request', text: '语音转写', durationMs: 2200 }]
+  v.page.__dsh.renderMsgs(v.chat)
+  const html = v.page.els.get('msgs').innerHTML
+  assert.match(html, /class="voice-user"><div class="voice-bubble"/)
+  assert.doesNotMatch(html, /class="bub"><div class="voice-bubble"/)
+  assert.match(html, /class="bub">普通文字<\/div>/)
+})
+
+function voiceMenuFixture() {
+  const v = voicePage(), audios = [], buttons = [], texts = []
+  for (let index = 0; index < 2; index++) {
+    const id = 'voice-' + index, button = makeEl('button'), icon = { textContent: '' }
+    button.dataset.voiceMenu = id; button.dataset.voicePlay = id; button.isConnected = true
+    const audio = { dataset: { session: v.chat.id, voiceId: id, voiceRevision: '' }, paused: true, ended: false, isConnected: true, playCalls: 0,
+      play() { this.playCalls++; this.paused = false; this.ended = false; this.onplay?.(); return Promise.resolve() },
+      pause() { const wasPlaying = !this.paused; this.paused = true; if (wasPlaying) this.onpause?.() },
+      closest(selector) { return selector === '.voice-bubble' ? box : null }, parentNode: { replaceChild() {} } }
+    const box = { querySelector: selector => selector === 'audio[data-voice-id]' ? audio : selector === '[data-voice-play]' ? button : null }
+    button.closest = selector => selector === '.voice-bubble' ? box : null; button.querySelector = () => icon
+    audios.push(audio); buttons.push(button); texts.push({ dataset: { voiceTranscript: id }, hidden: true })
+  }
+  v.page.els.get('msgs').querySelectorAll = selector => selector === 'audio[data-voice-id]' ? audios : selector === '[data-voice-transcript]' ? texts : []
+  v.page.__dsh.renderMsgs(v.chat)
+  const target = button => ({ closest: selector => selector === '[data-voice-menu]' || selector === '[data-voice-play]' ? button : null })
+  const pointer = (type, button = buttons[0], extra = {}) => v.page.els.get('scroller').dispatch(type, { target: target(button), pointerId: 1, clientX: 20, clientY: 40, button: 0, preventDefault() {}, ...extra })
+  const menu = (button = buttons[0]) => pointer('contextmenu', button)
+  const action = value => { v.page.els.get('sheet').onclick({ target: { closest: selector => selector === '[data-voice-action]' ? { dataset: { voiceAction: value } } : null } }); if (value !== 'device') v.page.dispatchWindow('popstate', { state: { v: 'chat', s: v.chat.id, od: 0 } }) }
+  return { ...v, audios, buttons, texts, pointer, menu, action }
+}
+
+test('voice long press reveals menu, suppresses click, and text toggles without rebuilding players', () => {
+  const v = voiceMenuFixture()
+  v.pointer('pointerdown'); v.page.fireTimeouts(450)
+  assert.match(v.page.els.get('sheet').innerHTML, /转文字/)
+  v.pointer('click'); assert.equal(v.audios[0].playCalls, 0)
+  v.action('text'); assert.equal(v.texts[0].hidden, false)
+  v.menu(); assert.match(v.page.els.get('sheet').innerHTML, /隐藏文字/)
+  v.action('text'); assert.equal(v.texts[0].hidden, true)
+})
+
+test('moving, scrolling, pointer cancel and early release cannot open a voice menu', () => {
+  for (const cancel of ['pointermove', 'scroll', 'pointercancel', 'pointerup']) {
+    const v = voiceMenuFixture(), before = v.page.els.get('sheet').innerHTML
+    v.pointer('pointerdown'); v.pointer(cancel, v.buttons[0], { clientY: 80 }); v.page.fireTimeouts(450)
+    assert.equal(v.page.els.get('sheet').innerHTML, before, cancel)
+    assert.equal(v.audios[0].playCalls, 0)
+  }
+})
+
+test('continuous playback snapshots loaded order and stops on scroll or playback error', async () => {
+  for (const stop of ['none', 'scroll', 'error']) {
+    const v = voiceMenuFixture(); v.menu(); v.action('queue')
+    assert.equal(v.audios[0].playCalls, 1)
+    const extra = { dataset: { session: v.chat.id }, paused: true, playCalls: 0, pause() {}, play() { this.playCalls++; return Promise.resolve() } }
+    v.audios.push(extra)
+    if (stop === 'scroll') v.pointer('scroll')
+    if (stop === 'error') v.audios[0].onerror()
+    v.audios[0].paused = true; v.audios[0].ended = true; v.audios[0].onended(); await new Promise(r => setTimeout(r, 5))
+    assert.equal(v.audios[1].playCalls, stop === 'none' ? 1 : 0, stop)
+    if (stop === 'none') { v.audios[1].paused = true; v.audios[1].ended = true; v.audios[1].onended() }
+    assert.equal(extra.playCalls, 0, 'newly loaded media is not silently added')
+  }
+})
+
+test('message POST confirmation renders immediately and an older in-flight GET cannot erase it', async () => {
+  const reads = []; let saved
+  const v = voicePage({ intercept: (url, options) => {
+    if (url.startsWith('/m/api/voice?')) return new Promise(resolve => reads.push(resolve))
+    if (url === '/m/api/voice') { saved = { ...JSON.parse(options.body), createdAt: '2026-10-13T00:00:00Z' }; return Promise.resolve({ ok: true, json: async () => ({ ok: true, value: saved }) }) }
+  } })
+  const oldGet = v.page.__dsh.loadVoiceHistory(v.chat.id)
+  v.start('chat'); await new Promise(r => setTimeout(r, 10)); v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.chat.voiceItems.length, 1)
+  assert.match(v.page.els.get('msgs').innerHTML, /data-voice-play=/)
+  reads.shift()({ ok: true, json: async () => ({ ok: true, value: { items: [] } }) }); await oldGet; await new Promise(r => setTimeout(r, 5))
+  assert.equal(v.chat.voiceItems.length, 1)
+  reads.shift()({ ok: true, json: async () => ({ ok: true, value: { items: [saved] } }) })
+  await new Promise(r => setTimeout(r, 5)); v.page.dshStopVoice()
+})
+
+test('history playback stops message auto playback but cannot interrupt an active phone call', async () => {
+  for (const mode of ['chat', 'call']) {
+    const v = voiceMenuFixture(); v.start(mode); await new Promise(r => setTimeout(r, 10))
+    v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+    v.emit('audio', { audio: 'YQ==', sentenceId: 0 }); await new Promise(r => setTimeout(r, 10))
+    v.pointer('click')
+    await new Promise(r => setTimeout(r, 5))
+    assert.equal(v.audios[0].playCalls, mode === 'chat' ? 1 : 0)
+    if (mode === 'call') { assert.match(v.page.els.get('toast').textContent, /请先挂断/); v.page.dshStopVoice() }
+    else assert.equal(v.tracks.stops, 1)
+  }
+})
+
+function metadataStreamFixture() {
+  const page = bootApp(), streams = [], c = chatWithQueue(page.__dsh.S, 'metadata-session', false)
+  let items = [], reads = 0
+  const original = page.fetch
+  page.fetch = (url, options) => String(url).startsWith('/m/api/voice?') ? (++reads, Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, value: { items } }) })) : original(url, options)
+  page.EventSource = class {
+    constructor(url) { this.url = url; this.closed = 0; this.handlers = {}; streams.push(this) }
+    close() { this.closed++ }
+    addEventListener(name, fn) { this.handlers[name] = fn }
+    emit(s, item) { this.handlers['voice-saved']?.({ data: JSON.stringify({ s, item }) }) }
+  }
+  page.__dsh.S.cur = null; page.dshOpen(c.id)
+  return { page, c, streams, setItems(value) { items = value }, reads: () => reads }
+}
+
+test('voiceSaved uses the existing frame stream with precise session ownership and reconnect reconciliation', async () => {
+  const v = metadataStreamFixture(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.streams.length, 0, 'opening a chat must not allocate a second metadata EventSource')
+  const emit = (s, item) => v.page.__dsh.onFrame({ t: 'voiceSaved', s, item })
+  const item = { id: 'confirmed-sse', role: 'user', mode: 'message', requestId: 'r1', text: '已保存的原声', createdAt: '2026-10-13T00:00:00Z' }
+  emit(v.c.id, item); assert.equal(v.c.voiceItems[0].id, item.id)
+  emit('wrong-session', { ...item, id: 'wrong' }); assert.equal(v.c.voiceItems.length, 1)
+  v.page.dshOpen('another-metadata'); emit(v.c.id, { ...item, id: 'late' }); assert.equal(v.c.voiceItems.length, 1)
+  await new Promise(r => setTimeout(r, 5)); const before = v.reads()
+  v.page.__dsh.S.hellos = 1; v.page.__dsh.onFrame({ t: 'hello' }); await new Promise(r => setTimeout(r, 10))
+  assert.ok(v.reads() > before)
+  assert.equal(v.streams.some(stream => stream.url.startsWith('/m/api/voice/events')), false)
+})
+
+test('call metadata events fetch the grouped history instead of exposing raw speech segments', async () => {
+  const v = metadataStreamFixture(); await new Promise(r => setTimeout(r, 10))
+  v.setItems([{ id: 'grouped-call', role: 'assistant', mode: 'call', segmentIds: ['part1', 'part2'], text: '连续的回复' }])
+  const before = v.reads()
+  v.page.__dsh.onFrame({ t: 'voiceSaved', s: v.c.id, item: { id: 'part2', role: 'assistant', mode: 'call', callId: 'call-a' } })
+  await new Promise(r => setTimeout(r, 10))
+  assert.ok(v.reads() > before); assert.equal(v.c.voiceItems[0].id, 'grouped-call')
+  assert.equal(v.c.voiceItems.length, 1)
+})
+
+test('live call waits for model end, synthesis drain, audio playback and echo tail before listening again', async () => {
+  const v = voicePage(); v.start('call'); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  v.emit('turn', { state: 'agent-speaking' }); v.emit('tts-state', { busy: true })
+  v.emit('audio', { audio: 'YQ==', sentenceId: 0 }); await new Promise(r => setTimeout(r, 10))
+  v.emit('audio', { audio: '', text: '你好，我在听。', final: true, sentenceId: 0 })
+  assert.equal(v.page.els.get('voiceCaption').textContent, 'DSH：你好，我在听。')
+  v.page.window.__dsh.onFrame({ t: 'run', s: 'voice-test', on: false })
+  v.emit('turn', { state: 'listening' })
+  const cancels = () => v.calls.filter(c => c.url === '/voice-mode/cancel').length
+  v.page.fireTimeouts(250); await new Promise(r => setTimeout(r, 5)); assert.equal(cancels(), 0)
+  v.emit('tts-state', { busy: false }); v.page.fireTimeouts(250)
+  await new Promise(r => setTimeout(r, 5)); assert.equal(cancels(), 0, 'audio still playing')
+  v.players[0].onended(); await new Promise(r => setTimeout(r, 5))
+  assert.equal(cancels(), 0, 'echo tail')
+  v.page.fireTimeouts(250); await new Promise(r => setTimeout(r, 10))
+  assert.equal(cancels(), 1)
+  assert.match(v.page.els.get('voiceState').textContent, /正在听/)
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 1, 'resuming never sends another prompt')
+  v.page.els.get('voiceEnd').onclick()
+})
+
+test('manual voice messages never auto-resume and ending a call cancels its delayed resume', async () => {
+  for (const mode of ['chat', 'call']) {
+    const v = voicePage(); v.start(mode); await new Promise(r => setTimeout(r, 10))
+    v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+    v.emit('turn', { state: 'agent-speaking' }); v.emit('turn', { state: 'listening' })
+    v.page.window.__dsh.onFrame({ t: 'run', s: 'voice-test', on: false })
+    if (mode === 'call') v.page.els.get('voiceEnd').onclick()
+    v.page.fireTimeouts(600); await new Promise(r => setTimeout(r, 10))
+    assert.equal(v.calls.filter(c => c.url === '/voice-mode/cancel').length, 0)
+    if (mode === 'chat') v.page.els.get('voiceEnd').onclick()
+  }
+})
+test('voice dictation appends to draft without sending a model prompt and releases the microphone', async () => {
+  const { page, start, calls, tracks, nodes } = voicePage()
+  page.els.get('input').value = '原有草稿'
+  start('draft'); await new Promise(r => setTimeout(r, 10))
+  assert.equal(nodes.length, 1)
+  page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(page.els.get('input').value, '原有草稿\n这是录音转成的文字。')
+  assert.equal(page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0)
+  assert.equal(tracks.stops, 1)
+  assert.ok(calls.some(c => c.url.includes('final=1')))
+})
+
+test('dictation mic finish drains pending partial and tail once without duplicate caption or automatic send', async () => {
+  let resolvePartial
+  const v = voicePage({ intercept: url => url.includes('/asr?') && !url.includes('final=1') ? new Promise(resolve => { resolvePartial = resolve }) : url.includes('final=1') ? Promise.resolve({ ok: true, json: async () => ({ text: '前半句和最后一句' }) }) : null })
+  v.start('draft'); await new Promise(r => setTimeout(r, 10))
+  for (let n = 0; n < 12; n++) v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.1) } })
+  await new Promise(r => setTimeout(r, 5))
+  assert.equal(v.page.els.get('voiceCaption').hidden, true); assert.equal(v.page.els.get('voiceEnd').hidden, true)
+  assert.equal(v.page.els.get('voiceFinish').textContent, '结束录音')
+  v.page.els.get('mic').onclick(); v.page.els.get('mic').onclick()
+  assert.equal(v.tracks.stops, 1, 'capture stops immediately while finalization drains')
+  resolvePartial({ ok: true, json: async () => ({ text: '前半句' }) }); await new Promise(r => setTimeout(r, 15))
+  assert.equal(v.page.els.get('input').value, '前半句和最后一句')
+  assert.equal(v.page.els.get('voiceCaption').textContent, '')
+  assert.equal(v.calls.filter(c => c.url.includes('final=1')).length, 1)
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0)
+})
+
+test('dictation disables send until final ASR is retained and direct handler cannot send a partial', async () => {
+  let finish
+  const v = voicePage({ intercept: url => url.includes('/asr?') ? url.includes('final=1') ? new Promise(resolve => { finish = resolve }) : Promise.resolve({ ok: true, json: async () => ({ text: '半句话' }) }) : null })
+  v.start('draft'); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.page.els.get('send').disabled, true)
+  for (let n = 0; n < 12; n++) v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.1) } })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.page.els.get('input').value, '半句话')
+  assert.equal(v.page.els.get('send').disabled, true)
+  v.page.els.get('send').onclick()
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0)
+  assert.equal(v.page.els.get('input').value, '半句话')
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 5))
+  assert.equal(v.page.els.get('send').disabled, true)
+  v.page.els.get('send').onclick()
+  finish({ ok: true, json: async () => ({ text: '半句话以及完整末尾' }) }); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.page.els.get('send').disabled, false)
+  assert.equal(v.page.els.get('input').value, '半句话以及完整末尾')
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0)
+})
+
+test('dictation final response after navigation updates only its originating draft', async () => {
+  let resolveFinal
+  const v = voicePage({ intercept: url => url.includes('final=1') ? new Promise(resolve => { resolveFinal = resolve }) : null })
+  v.start('draft'); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 5))
+  chatWithQueue(v.S, 'another-chat', false); v.page.els.get('input').value = '新对话的草稿'
+  resolveFinal({ ok: true, json: async () => ({ text: '原对话最后一句' }) }); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.S.drafts['voice-test'], '原对话最后一句')
+  assert.equal(v.page.els.get('input').value, '新对话的草稿')
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0)
+})
+
+test('editing a partial dictation keeps the edit and appends only the unshown final suffix', async () => {
+  const v = voicePage({ intercept: url => url.includes('/asr?') ? Promise.resolve({ ok: true, json: async () => ({ text: url.includes('final=1') ? '前半句最后几个字' : '前半句' }) }) : null })
+  v.start('draft'); await new Promise(r => setTimeout(r, 10))
+  for (let n = 0; n < 12; n++) v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.1) } })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.page.els.get('input').value, '前半句')
+  v.page.els.get('input').value = '用户改过的前半句'
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.page.els.get('input').value, '用户改过的前半句\n最后几个字')
+})
+
+function imageFixture() {
+  const page = bootApp(), { S } = page.__dsh, images = [], revoked = []
+  chatWithQueue(S, 'photo-a', false)
+  let serial = 0
+  page.URL.createObjectURL = () => 'blob:photo-' + (++serial)
+  page.URL.revokeObjectURL = url => revoked.push(url)
+  page.Image = class { constructor() { this.naturalWidth = 100; this.naturalHeight = 100; images.push(this) } }
+  const create = page.document.createElement
+  page.document.createElement = tag => tag === 'canvas' ? { getContext: () => ({ fillRect() {}, drawImage() {} }), toDataURL: () => 'data:image/jpeg;base64,YQ==' } : create(tag)
+  const select = count => { page.els.get('file').files = Array.from({ length: count }, (_, index) => ({ name: 'picture' + index + '.jpg' })); page.els.get('file').onchange() }
+  return { page, S, images, revoked, select }
+}
+
+test('late image preparation cannot cross conversations even when returning to the original chat', async () => {
+  const { page, S, images, revoked, select } = imageFixture()
+  select(1)
+  page.dispatchWindow('popstate', { state: { v: 'chat', s: 'photo-b' } })
+  page.dispatchWindow('popstate', { state: { v: 'chat', s: 'photo-a' } })
+  images[0].onload(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(S.att.length, 0); assert.deepEqual(revoked, ['blob:photo-1'])
+})
+
+test('overlapping image batches respect the final six-image limit and revoke overflow', async () => {
+  const { S, images, revoked, select } = imageFixture()
+  select(6); select(6)
+  images.forEach(image => image.onload()); await new Promise(r => setTimeout(r, 10))
+  assert.equal(S.att.length, 6); assert.equal(revoked.length, 6)
+  assert.equal(new Set(S.att.map(image => image.url)).size, 6)
+})
+
+test('navigating away pauses chat voice replay without resending or deleting messages', () => {
+  const page = bootApp(), c = chatWithQueue(page.__dsh.S, 'voice-a', false)
+  const audio = { dataset: { session: c.id }, paused: false, ended: false, pause() { this.paused = true } }
+  page.els.get('msgs').querySelectorAll = selector => selector === 'audio[data-voice-id]' ? [audio] : []
+  page.dispatchWindow('popstate', { state: {} })
+  assert.equal(audio.paused, true); assert.equal(page.__dsh.S.cur, null)
+  assert.equal(page.__dsh.S.chats.has(c.id), true)
+})
+
+test('call mute before microphone grant is safe and applies to the granted track', async () => {
+  const v = voicePage(); let grant
+  v.page.navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { grant = resolve })
+  v.start('call'); await new Promise(r => setTimeout(r, 5))
+  assert.doesNotThrow(() => v.page.els.get('callMute').onclick())
+  grant({ getTracks: () => [v.tracks] }); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.tracks.enabled, false); assert.match(v.page.els.get('callState').textContent, /静音/)
+  v.page.els.get('callHangup').onclick()
+})
+
+test('call mute during original-audio persistence prevents delayed prompt submission', async () => {
+  let save
+  const v = voicePage({ intercept: url => url === '/m/api/voice' ? new Promise(resolve => { save = resolve }) : null })
+  v.start('call'); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  v.page.els.get('callMute').onclick(); v.page.els.get('callMute').onclick()
+  save({ ok: true, json: async () => ({ ok: true, value: {} }) }); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0, 'unmuting cannot revive the cancelled turn')
+  assert.match(v.page.els.get('callState').textContent, /未发送/)
+  v.page.els.get('callHangup').onclick()
+})
+
+test('call coalesces unsent PCM behind one slow partial ASR without queuing redundant decodes', async () => {
+  const requests = [], waiting = []
+  const v = voicePage({ intercept: (url, options) => url.includes('/asr?') ? new Promise(resolve => { requests.push({ url, samples: new Float32Array(options.body).length }); waiting.push(resolve) }) : null })
+  v.start('call'); await new Promise(r => setTimeout(r, 10))
+  const feed = level => v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(level) } })
+  for (let n = 0; n < 48; n++) feed(0.1)
+  for (let n = 0; n < 11; n++) feed(0)
+  await new Promise(r => setTimeout(r, 5))
+  assert.equal(requests.length, 1, 'the first partial is still in flight')
+  // Deterministic simulated transport/ASR cost: 200 ms per response after
+  // the endpoint. This does not measure the real model, network or device.
+  for (let n = 0; n < 8 && waiting.length; n++) { v.page.advance(200); waiting.shift()({ ok: true, json: async () => ({ text: '固定测试语句' }) }); await new Promise(r => setTimeout(r, 5)) }
+  assert.equal(requests.length, 2, 'one in-flight partial plus one final, not a backlog of obsolete partial decodes')
+  assert.match(requests[1].url, /final=1/)
+  assert.equal(+new URL(requests[1].url, 'https://fixture').searchParams.get('offset'), requests[0].samples)
+  assert.equal(requests.reduce((n, r) => n + r.samples, 0), 59 * Math.floor(4096 / 3), 'every PCM sample reaches ASR exactly once')
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 1)
+  const timing = v.page.__dsh.getVoiceTiming()
+  assert.equal(timing.promptSubmittedAt - timing.endpointAt, 400, 'two simulated 200 ms ASR responses; real-world savings are not asserted')
+  assert.equal(timing.finalStartedAt - timing.finalQueuedAt, 200)
+  assert.ok(timing.promptSubmittedAt >= timing.storedAt)
+  v.page.dshStopVoice()
+})
+
+test('call idle silence sends no ASR; a 250ms preroll precedes two seconds of speech exactly once', async () => {
+  const requests = []
+  const v = voicePage({ intercept: (url, options) => url.includes('/asr?') ? (requests.push({ url, pcm: new Float32Array(options.body) }), Promise.resolve({ ok: true, json: async () => ({ text: '固定两秒语句' }) })) : null })
+  v.start('call'); await new Promise(r => setTimeout(r, 10))
+  const feed = level => v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(level) } })
+  for (let n = 0; n < 118; n++) feed(0)
+  await new Promise(r => setTimeout(r, 5)); assert.equal(requests.length, 0, 'ten seconds waiting for speech must not enter ASR')
+  assert.equal(v.page.rpcCalls.length, 0)
+  feed(0.005) // quiet leading consonant retained by the pre-roll
+  for (let n = 0; n < 24; n++) feed(0.1)
+  for (let n = 0; n < 11; n++) feed(0)
+  await new Promise(r => setTimeout(r, 20))
+  const posted = JSON.parse(v.calls.find(call => call.url === '/m/api/voice').options.body), wav = Buffer.from(posted.audio, 'base64')
+  const samples = (wav.length - 44) / 2, block = Math.floor(4096 / 3)
+  assert.equal(samples, 4000 + (24 + 11) * block)
+  assert.equal(posted.durationMs, Math.round(samples / 16))
+  assert.ok(posted.durationMs < 3500)
+  assert.equal(wav.readInt16LE(44 + 3999 * 2), Math.trunc(0.005 * 32767), 'quiet leading sound was not discarded')
+  assert.equal(wav.readInt16LE(44 + 4000 * 2), Math.trunc(0.1 * 32767))
+  assert.equal(wav.readInt16LE(wav.length - 2), 0, 'tail retained')
+  let offset = 0
+  for (const request of requests) { assert.equal(+new URL(request.url, 'https://fixture').searchParams.get('offset'), offset); offset += request.pcm.length }
+  assert.equal(offset, samples); assert.equal(requests.filter(request => request.url.includes('final=1')).length, 1)
+  assert.equal(v.page.rpcCalls.filter(call => call.method === 'session.prompt').length, 1)
+  v.page.dshStopVoice()
+})
+
+test('call idle beyond recording limit still cannot manufacture an utterance', async () => {
+  const v = voicePage(); v.start('call'); await new Promise(r => setTimeout(r, 10))
+  for (let n = 0; n < 720; n++) v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096) } })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.calls.filter(call => call.url.includes('/asr?')).length, 0)
+  assert.equal(v.calls.filter(call => call.url === '/m/api/voice').length, 0)
+  assert.equal(v.page.rpcCalls.filter(call => call.method === 'session.prompt').length, 0)
+  v.page.dshStopVoice()
+})
+
+test('starting a new call turn clears the previous pre-roll rather than attaching stale quiet audio', async () => {
+  const v = voicePage(); v.start('call'); await new Promise(r => setTimeout(r, 10))
+  const feed = level => v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(level) } })
+  for (let n = 0; n < 10; n++) feed(0.005)
+  v.page.els.get('callInterrupt').onclick(); await new Promise(r => setTimeout(r, 10))
+  for (let n = 0; n < 24; n++) feed(0.1)
+  for (let n = 0; n < 11; n++) feed(0)
+  await new Promise(r => setTimeout(r, 20))
+  const posted = JSON.parse(v.calls.find(call => call.url === '/m/api/voice').options.body), wav = Buffer.from(posted.audio, 'base64')
+  assert.equal((wav.length - 44) / 2, 35 * Math.floor(4096 / 3))
+  assert.equal(wav.readInt16LE(44), Math.trunc(0.1 * 32767))
+  v.page.dshStopVoice()
+})
+
+test('old epoch partial completion cannot unlock a newer partial; cancelling final never submits', async () => {
+  const requests = [], waiting = []
+  const v = voicePage({ intercept: (url, options) => url.includes('/asr?') ? new Promise(resolve => { requests.push({ url, bytes: options.body.byteLength }); waiting.push(resolve) }) : null })
+  v.start('call'); await new Promise(r => setTimeout(r, 10))
+  const feed = n => { for (let i = 0; i < n; i++) v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.1) } }) }
+  feed(12); await new Promise(r => setTimeout(r, 5))
+  v.page.els.get('callInterrupt').onclick(); await new Promise(r => setTimeout(r, 10))
+  feed(12); await new Promise(r => setTimeout(r, 5))
+  assert.equal(requests.length, 2)
+  assert.notEqual(new URL(requests[0].url, 'https://fixture').searchParams.get('epoch'), new URL(requests[1].url, 'https://fixture').searchParams.get('epoch'))
+  waiting.shift()({ ok: true, json: async () => ({ text: '旧轮结果不得混入' }) }); await new Promise(r => setTimeout(r, 5))
+  feed(12); await new Promise(r => setTimeout(r, 5)); assert.equal(requests.length, 2, 'new epoch remains busy')
+  v.page.els.get('voiceFinish').onclick()
+  waiting.shift()({ ok: true, json: async () => ({ text: '新轮半句' }) }); await new Promise(r => setTimeout(r, 5))
+  assert.equal(requests.length, 3); assert.match(requests[2].url, /final=1/)
+  v.page.els.get('callHangup').onclick()
+  waiting.shift()({ ok: true, json: async () => ({ text: '新轮整句' }) }); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0)
+  assert.equal(v.calls.filter(c => c.url === '/m/api/voice').length, 0)
+})
+test('voice does not overwrite edits and backgrounding releases capture', async () => {
+  const { page, start, tracks } = voicePage()
+  start('draft'); await new Promise(r => setTimeout(r, 10))
+  page.els.get('input').value = '用户刚刚改过的内容'
+  page.els.get('voiceFinish').onclick(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(page.els.get('input').value, '用户刚刚改过的内容\n这是录音转成的文字。')
+  assert.equal(tracks.stops, 1)
+})
+test('voice conversation sends once only after a final transcript; an early exit releases a late microphone grant', async () => {
+  const first = voicePage()
+  first.start('chat'); await new Promise(r => setTimeout(r, 10))
+  first.page.els.get('voiceFinish').onclick(); first.page.els.get('voiceFinish').onclick()
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(first.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 1)
+  first.page.document.visibilityState = 'hidden'; first.page.dispatchDocument('visibilitychange')
+  assert.equal(first.tracks.stops, 1)
+  const second = voicePage()
+  let allow
+  second.page.navigator.mediaDevices.getUserMedia = () => new Promise(r => { allow = r })
+  second.start('draft'); await new Promise(r => setTimeout(r, 5))
+  second.page.els.get('voiceEnd').onclick()
+  allow({ getTracks: () => [second.tracks] }); await new Promise(r => setTimeout(r, 10))
+  assert.equal(second.tracks.stops, 1)
+  assert.equal(second.calls.some(c => c.url === '/voice-mode/toggle'), false)
+})
+
+test('permission picker reads the session, confirms full access and sends only a preset change', async () => {
+  let currentValue = 'workspace-write'
+  const values = () => ({ currentValue, options: ['read-only', 'workspace-write', 'danger-full-access'].map(value => ({ value, name: value })) })
+  const page = bootApp({ rpcResult: call => {
+    if (call.method === 'session.selectPermission') currentValue = call.payload.preset
+    return { ok: true, value: values() }
+  } })
+  const { S, onFrame } = page.window.__dsh
+  const c = chatWithQueue(S, 'permission-session', false)
+  onFrame({ t: 'permissions', s: c.id, value: values() })
+  assert.match(page.els.get('permission').innerHTML, /工作区写入/)
+  page.els.get('permission').onclick()
+  await new Promise(r => setTimeout(r, 10))
+  assert.match(page.els.get('permissionOptions').innerHTML, /Read Only/)
+  assert.match(page.els.get('permissionOptions').innerHTML, /Full access/)
+  const click = preset => page.els.get('sheet').onclick({ target: { closest: () => ({ dataset: { permission: preset } }) } })
+  page.confirm = () => false
+  click('danger-full-access')
+  assert.equal(page.rpcCalls.filter(c => c.method === 'session.selectPermission').length, 0)
+  page.confirm = () => true
+  click('danger-full-access'); click('read-only')
+  await new Promise(r => setTimeout(r, 10))
+  const writes = page.rpcCalls.filter(c => c.method === 'session.selectPermission')
+  assert.equal(writes.length, 1, 'double tap cannot issue a second write')
+  assert.deepEqual(writes[0].payload, { sessionId: c.id, preset: 'danger-full-access', confirmFullAccess: true })
+  assert.equal(c.permissions.currentValue, 'danger-full-access')
+  assert.equal(page.rpcCalls.some(c => c.method === 'session.prompt'), false)
+  onFrame({ t: 'permissions', s: c.id, value: { ...values(), currentValue: 'read-only' } })
+  assert.match(page.els.get('permission').innerHTML, /只读/)
+})
+
+test('a late permissions read cannot overwrite a newer desktop projection', async () => {
+  let done
+  const response = new Promise(r => { done = r })
+  const page = bootApp({ rpcResult: () => response })
+  const { S, onFrame } = page.window.__dsh
+  const c = chatWithQueue(S, 'permission-race', false)
+  page.els.get('permission').onclick()
+  onFrame({ t: 'permissions', s: c.id, value: { currentValue: 'read-only', options: [] } })
+  done({ ok: true, value: { currentValue: 'danger-full-access', options: [] } })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(c.permissions.currentValue, 'read-only')
 })
 
 test('a delivered message retires the queue row that produced it', () => {
@@ -900,6 +1950,95 @@ test('DSH-only mode clears stale external records and prompts while preserving n
   assert.equal(S.cur, null)
 })
 
+function downloadFixture(userAgent = 'browser', status = 200) {
+  const page = bootApp({ userAgent }), c = chatWithQueue(page.__dsh.S, 'download-session', false), calls = [], links = []
+  const fetch = page.fetch
+  page.fetch = (url, options) => String(url).startsWith('/m/api/raw?') ? (calls.push({ url, options }), Promise.resolve({ ok: status === 200, status })) : fetch(url, options)
+  const create = page.document.createElement
+  page.document.createElement = tag => { const element = create(tag); if (tag === 'a') element.click = () => links.push({ href: element.href, download: element.download }); return element }
+  const note = { hidden: true, textContent: '' }, video = { dataset: { session: c.id, artifact: '成片/完整视频.mp4', quality: 'preview' }, src: '/m/api/raw?quality=preview' }
+  const box = { querySelector: selector => selector === 'video' ? video : selector === '.video-download-state' ? note : null }
+  const button = { closest: selector => selector === '[data-video-box]' ? box : null }
+  return { page, calls, links, note, button, tap() { page.els.get('scroller').dispatch('click', { target: { closest: selector => selector === '[data-video-download]' ? button : null } }) } }
+}
+
+test('browser video download always requests attachment original instead of active preview', async () => {
+  const v = downloadFixture(); v.tap(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.calls[0].options.method, 'HEAD'); assert.match(v.calls[0].url, /download=1/)
+  assert.doesNotMatch(v.calls[0].url, /quality=preview/)
+  assert.equal(v.links.length, 1); assert.equal(v.links[0].href, v.calls[0].url)
+  assert.equal(v.links[0].download, '完整视频.mp4')
+  assert.match(v.note.textContent, /已请求浏览器下载/); assert.doesNotMatch(v.note.textContent, /完成/)
+})
+
+test('Android download waits for native queue and completion receipts and prevents double dispatch', async () => {
+  const v = downloadFixture('DSHApp/1.5.3+14'); v.tap(); v.tap(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.calls.length, 1); assert.equal(v.links.length, 0)
+  const bridge = new URL(v.page.location.href), requestId = bridge.searchParams.get('requestId')
+  assert.equal(bridge.protocol, 'dshapp:'); assert.equal(bridge.hostname, 'download')
+  assert.match(bridge.searchParams.get('url'), /^https:\/\/example.test\/m\/api\/raw\?/)
+  assert.match(bridge.searchParams.get('url'), /download=1/)
+  v.page.dshDownloadResult({ requestId, status: 'queued' })
+  assert.equal(v.button.disabled, true); assert.match(v.note.textContent, /尚未完成/)
+  v.page.dshDownloadResult({ requestId, status: 'complete' })
+  assert.equal(v.button.disabled, false); assert.match(v.note.textContent, /已保存/)
+  v.page.dshDownloadResult({ requestId, status: 'queued' })
+  assert.match(v.note.textContent, /已保存/, 'late queue callback cannot downgrade completion')
+})
+
+test('old Android download offers explicit APK update without navigating or fetching video', () => {
+  const v = downloadFixture('DSHApp/1.5.2+13'); v.tap()
+  assert.equal(v.calls.length, 0); assert.match(v.page.els.get('sheet').innerHTML, /data-download-update/)
+  assert.doesNotMatch(v.page.location.href, /^dshapp:/)
+  v.page.els.get('sheet').onclick({ target: { closest: () => ({}) } })
+  assert.equal(v.page.location.href, 'dshapp://update')
+})
+
+test('video download preflight errors stay visible and do not start a download', async () => {
+  const v = downloadFixture('browser', 403); v.tap(); await new Promise(r => setTimeout(r, 10))
+  assert.equal(v.links.length, 0); assert.match(v.note.textContent, /403/)
+  assert.equal(v.button.disabled, false); assert.equal(v.button.textContent, '重试下载原视频')
+})
+
+test('installed App uses only native download/fullscreen while browser and old App retain one fallback', () => {
+  for (const [userAgent, native] of [['DSHApp/1.5.3+14', true], ['DSHApp/1.5.2+13', false], ['browser', false]]) {
+    const page = bootApp({ userAgent }), c = resultChat(page)
+    c.items = [{ k: 'a', seq: 1, text: '[成片](成片.mp4)' }, { k: 'end', seq: 2, reason: 'completed' }]
+    page.__dsh.renderMsgs(c)
+    const html = page.els.get('msgs').innerHTML
+    assert.match(html, /<video[^>]* controls/)
+    assert.equal(html.includes('data-video-download'), !native, userAgent)
+    assert.equal(html.includes('data-video-fullscreen'), !native, userAgent)
+    assert.equal(html.includes('controlslist="nodownload nofullscreen"'), !native, userAgent)
+    assert.match(html, /data-video-quality/)
+  }
+})
+
+test('native player download receipts show toast without an external download button job', () => {
+  const page = bootApp({ userAgent: 'DSHApp/1.5.3+14' })
+  page.dshDownloadResult({ requestId: 'native-download', status: 'queued', message: '正在下载原视频，请查看通知' })
+  assert.equal(page.els.get('toast').textContent, '正在下载原视频，请查看通知')
+  page.dshDownloadResult({ requestId: 'native-download', status: 'complete', message: '原视频已保存到 Downloads/DSH' })
+  assert.equal(page.els.get('toast').textContent, '原视频已保存到 Downloads/DSH')
+  page.dshDownloadResult({ requestId: 'native-download', status: 'unsupported', message: '应忽略' })
+  assert.equal(page.els.get('toast').textContent, '原视频已保存到 Downloads/DSH')
+})
+
+test('active voice exposes one finish surface and restores microphone entry after ending', async () => {
+  for (const mode of ['draft', 'chat', 'call']) {
+    const v = voicePage(); v.start(mode); await new Promise(r => setTimeout(r, 10))
+    assert.equal(v.page.els.get('mic').hidden, true, mode)
+    assert.equal(v.page.els.get('voiceBar').hidden, mode === 'call', mode)
+    assert.equal(v.page.els.get('voiceEnd').hidden, mode === 'draft', mode)
+    if (mode === 'draft') assert.equal(v.page.els.get('voiceFinish').textContent, '结束录音')
+    if (mode === 'chat') assert.equal(v.page.els.get('voiceFinish').textContent, '说完发送')
+    if (mode === 'call') assert.equal(v.page.els.get('callPanel').hidden, false)
+    v.page.dshStopVoice(); await new Promise(r => setTimeout(r, 10))
+    assert.equal(v.page.els.get('mic').hidden, false, mode)
+    assert.equal(v.page.els.get('voiceBar').hidden, true, mode)
+  }
+})
+
 // Small adapter around the existing makeEl stub, scoped to this regression.
 // It only models video DOM movement. No browser, media, network or real data.
 function installVideoDom(s, targetId = 'msgs') {
@@ -1393,4 +2532,73 @@ test('native fullscreen exit after session switch cannot repaint or import the p
   assert.ok(dom.videos().every(movie => movie !== v && movie.dataset.session === other.id))
   assert.ok(dom.videos().every(movie => movie.currentTime === 0 && movie.playCalls === 0))
   assert.doesNotMatch(s.els.get('msgs').innerHTML, /old fullscreen pending result/, 'late exit does not paint the previous chat into the new one')
+})
+
+
+test('dictation menu click starts recording without hold and never sends before manual send', async () => {
+  const v = voicePage(); v.page.els.get('input').value = '原草稿';
+  const ui = holdUi(v, 'draft');
+  await new Promise(r => setTimeout(r, 15));
+  assert.equal(v.nodes.length, 1);
+  assert.equal(ui.button.hidden, true);
+  assert.equal(v.page.els.get('input').hidden, false);
+  assert.equal(v.page.els.get('voiceFinish').textContent, '结束录音');
+  ui.feed(14);
+  await new Promise(r => setTimeout(r, 15));
+  assert.match(v.page.els.get('input').value, /^原草稿/);
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0);
+  v.page.els.get('voiceFinish').onclick();
+  await new Promise(r => setTimeout(r, 20));
+  assert.match(v.page.els.get('input').value, /录音转成/);
+  assert.equal(v.tracks.stops, 1);
+  assert.equal(v.page.rpcCalls.filter(c => c.method === 'session.prompt').length, 0);
+  assert.equal(v.calls.some(c => c.url === '/m/api/voice'), false);
+  assert.equal(v.page.els.get('voiceBar').hidden, true);
+});
+function suggestionFixture(){
+ const page=bootApp(),c=chatWithQueue(page.__dsh.S,'suggestion-session',false),calls=[]
+ c.items=[{k:'u',seq:1,text:'test'},{k:'a',seq:2,text:'done'},{k:'end',seq:3,reason:'completed'}]
+ let finish
+ page.fetch=(url,opts)=>{if(url!=='/m/api/suggestions')return Promise.reject(Error('offline'));calls.push(opts);return new Promise(r=>{finish=value=>r({status:200,json:async()=>({ok:true,value})})})}
+ return {page,c,calls,finish:async(value={text:'下一步建议',revision:'r1'})=>{finish(value);for(let i=0;i<8;i++)await Promise.resolve()}}
+}
+test('suggestion is grey separate text, explicit acceptance saves draft without sending',async()=>{
+ const f=suggestionFixture(),{page}=f;page.__dsh.syncSuggestion();assert.equal(f.calls.length,0);page.fireTimeouts(1000);await f.finish()
+ assert.equal(page.els.get('input').value,'');assert.equal(page.els.get('inputSuggestion').textContent,'下一步建议');assert.equal(page.els.get('inputSuggestion').hidden,false)
+ page.els.get('inputSuggestion').onclick();assert.equal(page.els.get('input').value,'下一步建议');assert.equal(page.__dsh.S.drafts[f.c.id],'下一步建议');assert.equal(page.rpcCalls.length,0)
+})
+test('typed draft aborts request and late response cannot overwrite or show',async()=>{
+ const f=suggestionFixture();f.page.__dsh.syncSuggestion();f.page.fireTimeouts(1000);const input=f.page.els.get('input');input.value='自己写的';input.dispatch('input');assert.equal(f.calls[0].signal.aborted,true);await f.finish();assert.equal(input.value,'自己写的');assert.equal(f.page.els.get('inputSuggestion').hidden,true)
+ input.value='';input.dispatch('input');f.page.fireTimeouts(1000);assert.equal(f.calls.length,1)
+})
+test('suggestion Tab only accepts focused noncomposing input; Escape dismisses same turn',async()=>{
+ const f=suggestionFixture(),p=f.page,input=p.els.get('input');p.__dsh.syncSuggestion();p.fireTimeouts(1000);await f.finish();let prevented=0
+ input.dispatch('keydown',{key:'Tab',preventDefault(){prevented++}});assert.equal(prevented,0)
+ p.document.activeElement=input;input.dispatch('keydown',{key:'Tab',isComposing:true,preventDefault(){prevented++}});assert.equal(prevented,0)
+ input.dispatch('keydown',{key:'Tab',preventDefault(){prevented++}});assert.equal(prevented,1);assert.equal(input.value,'下一步建议')
+ const g=suggestionFixture();g.page.__dsh.syncSuggestion();g.page.els.get('input').dispatch('keydown',{key:'Escape'});g.page.__dsh.syncSuggestion();g.page.fireTimeouts(1000);assert.equal(g.calls.length,0)
+})
+test('approval, attachment, IME, running and hidden page suppress suggestions',()=>{
+ for(const guard of ['approval','attachment','ime','running','hidden']){const f=suggestionFixture(),p=f.page
+ if(guard==='approval')p.__dsh.S.asks.set('x',{s:f.c.id});if(guard==='attachment')p.__dsh.S.att.push({});if(guard==='ime')p.els.get('input').dispatch('compositionstart');if(guard==='running')p.__dsh.S.run.add(f.c.id);if(guard==='hidden')p.document.visibilityState='hidden'
+ p.__dsh.syncSuggestion();p.fireTimeouts(1000);assert.equal(f.calls.length,0,guard)}
+})
+test('session switch and hidden page discard late suggestions; new completed turn permits new request',async()=>{
+ const f=suggestionFixture(),p=f.page;p.__dsh.syncSuggestion();p.fireTimeouts(1000);p.__dsh.S.cur='another';p.__dsh.syncSuggestion();await f.finish();assert.equal(p.els.get('inputSuggestion').hidden,true)
+ p.__dsh.S.cur=f.c.id;f.c.items.push({k:'u',seq:4},{k:'a',seq:5,text:'next'},{k:'end',seq:6,reason:'completed'});p.__dsh.syncSuggestion();p.fireTimeouts(1000);assert.equal(f.calls.length,2)
+ p.document.visibilityState='hidden';p.dispatchDocument('visibilitychange');assert.equal(f.calls[1].signal.aborted,true);await f.finish();assert.equal(p.els.get('inputSuggestion').hidden,true)
+})
+test('failed suggestion request is attempted once per completed turn',async()=>{
+ const f=suggestionFixture();f.page.fetch=()=>{f.calls.push(1);return Promise.reject(Error('offline'))};f.page.__dsh.syncSuggestion();f.page.fireTimeouts(1000);for(let i=0;i<8;i++)await Promise.resolve()
+ f.page.__dsh.syncSuggestion();f.page.fireTimeouts(1000);assert.equal(f.calls.length,1);assert.equal(f.page.els.get('inputSuggestion').hidden,true)
+})
+test('inside-input suggestion suppresses placeholder then restores original on accept and dismiss',async()=>{
+ for(const action of ['accept','dismiss']){const f=suggestionFixture(),p=f.page,input=p.els.get('input');input.placeholder='发消息给 DSH';p.__dsh.syncSuggestion();p.fireTimeouts(1000);await f.finish();assert.equal(input.placeholder,'');assert.equal(input.value,'')
+ if(action==='accept')p.__dsh.acceptSuggestion();else p.dispatchWindow('keydown',{key:'Escape'})
+ assert.equal(input.placeholder,'发消息给 DSH');assert.equal(p.els.get('inputSuggestion').hidden,true)}
+})
+test('suggestion wrapper uses textarea sizing and hides with hold UI',()=>{
+ const html=fs.readFileSync(new URL('../www/index.html',import.meta.url),'utf8'),css=fs.readFileSync(new URL('../www/app.css',import.meta.url),'utf8')
+ assert.match(html,/<div id="inputWrap"[^>]*><textarea id="input"[\s\S]*?<button id="inputSuggestion"[\s\S]*?<\/div>/)
+ assert.match(css,/\.input-wrap\[hidden\]\{display:none\}/);assert.match(APP,/el\.input\.hidden = enabled; el\.inputWrap\.hidden = enabled/)
 })

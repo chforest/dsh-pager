@@ -14,6 +14,8 @@
  *   GET  /m/api/raw          an image / video / audio file of that workspace,
  *                            with Range support
  *   POST /m/api/rpc          allowlisted DSH unary call {method, payload}
+ *                            plus session.permissions / session.selectPermission
+ *   POST /m/api/desktop/workspace  local native folder picker, then workspace.create
  *   POST /m/api/respond      approval / question answer {rpcId, result}
  *   GET  /m/api/push/key     Web Push: this server's public key + device count
  *   POST /m/api/push/subscribe | unsubscribe | test
@@ -55,7 +57,7 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue, fullCall, resultCallId, foldUsage } from './fold.js'
 import { NotifyHub } from './notify.js'
-import { confine, describe as describeFile, parseRange, MEDIA } from './files.js'
+import { confine, describe as describeFile, parseRange, MEDIA } from './files.js?absolute-path-v1'
 import { createVideoPreviews } from './video.js'
 import { WebPush, noticePayload, defaultDir } from './push.js'
 import { spawn } from 'node:child_process'
@@ -63,6 +65,12 @@ import { AgentHub, SOURCES, resolveBins } from './agents.js'
 import { createPresence } from './presence.js'
 import { foldFile, recentFiles, headMeta } from './transcripts.js'
 import * as quick from './commands.js'
+import { pickDesktopDirectory } from './native-folder.js'
+import { captureDesktopRegion } from './native-screenshot.js?visible-v5'
+import { createScreenshotBroker } from './screenshot-broker.js?text-tools-v2'
+import { createVoiceStore, voiceSession, MAX_AUDIO } from './voice-store.js?voice-messages-20261012-v6'
+import { createRemoteFolders } from './remote-folders.js?drive-cache-v2'
+import { createAsyncQuestions } from './async-questions.js?async-v1'
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 const WWW = path.join(PLUGIN_DIR, 'www')
@@ -72,6 +80,7 @@ const RPC_ALLOW = new Set([
   'session.create', 'session.prompt', 'session.cancel', 'session.models', 'session.selectModel',
   'session.rename', 'session.search', 'session.updateQueue', 'workspace.archiveSession',
 ])
+const PERMISSION_PRESETS = new Set(['read-only', 'workspace-write', 'danger-full-access'])
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -81,6 +90,8 @@ const MIME = {
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]'])
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export function normalizeHtmlNewlines(text) { return text.replace(/\r\n?/g, '\n') }
 
 /**
  * Canonical form of one `trustedHosts` entry, or null when it is not a bare
@@ -166,12 +177,50 @@ function readJson(req, limit) {
  *   starts one of them; only the demo (demo/fake-dsh.mjs) replaces the real ones.
  * @returns {{ handle: (req, res) => Promise<void>, close: () => void }}
  */
-export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk, externalAgents = false, previewDir, ffmpeg, transcripts = {}, spawnAgent = spawn }) {
+export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk, externalAgents = false, previewDir, voiceDir, questionDir, remoteFolderOptions, ffmpeg, transcripts = {}, spawnAgent = spawn, pickDirectory = pickDesktopDirectory, captureRegion = captureDesktopRegion, screenshotTranslate, screenshotRecognize, suggestionProvider }) {
   if (typeof externalAgents !== 'boolean') throw new Error('externalAgents must be a boolean')
   // Fail the load loudly, as DSH does, rather than 403 every phone request later.
   const badHost = trustedHosts.find((h) => canonicalTrustedHost(h) === null)
   if (badHost !== undefined) throw new Error(`dsh-pager: trustedHosts entry ${JSON.stringify(badHost)} is not a bare host[:port] authority`)
   const bridges = new Set()
+  const voiceWatchers = new Map()
+  let voiceWatcherCount = 0, voiceStopped = false
+  function subscribeVoice(sid, req, res) {
+    if (voiceStopped) throw Object.assign(new Error('语音事件服务已关闭'), { status: 503 })
+    let watchers = voiceWatchers.get(sid)
+    if (voiceWatcherCount >= 64 || (watchers && watchers.size >= 16)) throw Object.assign(new Error('语音事件连接过多，请关闭重复页面'), { status: 429, code: 'voice-storage' })
+    if (!watchers) { watchers = new Set(); voiceWatchers.set(sid, watchers) }
+    let timer, ended = false
+    const watcher = { send, close }
+    function close() {
+      if (ended) return
+      ended = true; clearInterval(timer)
+      watchers.delete(watcher); voiceWatcherCount--
+      if (!watchers.size) voiceWatchers.delete(sid)
+      req.off('close', close); res.off('close', close); res.off('error', close)
+      if (!res.writableEnded) res.end()
+    }
+    function send(frame) {
+      if (ended) return
+      try { if (!res.write(frame)) { close(); res.destroy() } } catch { close() }
+    }
+    watchers.add(watcher); voiceWatcherCount++
+    res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'private, no-cache, no-transform', 'x-accel-buffering': 'no' })
+    req.on('close', close); res.on('close', close); res.on('error', close)
+    timer = setInterval(() => send(': heartbeat\n\n'), 15000)
+    timer.unref?.()
+    send('retry: 2000\n: connected\n\n')
+  }
+  function voiceSaved(s, item) {
+    const frame = 'event: voice-saved\ndata: ' + JSON.stringify({ s, item }) + '\n\n'
+    for (const watcher of voiceWatchers.get(s) || []) watcher.send(frame)
+    // Phones already consume this authenticated bridge; reuse its connection
+    // instead of spending another HTTP/1 SSE slot for the same notification.
+    for (const bridge of bridges) bridge.send({ t: 'voiceSaved', s, item })
+  }
+  const permissionWrites = new Set()
+  let folderPick = null
+  const screenshots = createScreenshotBroker({ dshPort: servePort, captureRegion, translate: screenshotTranslate, ...(screenshotRecognize ? { recognize: screenshotRecognize } : {}) })
   let shell = null
   const previews = createVideoPreviews({ dir: previewDir || path.join(PLUGIN_DIR, '.cache', 'video'), ffmpeg, log })
 
@@ -184,6 +233,19 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
 
   // Installed web apps (iPhone) get the same notices through Web Push.
   const dataDir = pushDir || defaultDir()
+  const voices = createVoiceStore({ dir: voiceDir || path.resolve(PLUGIN_DIR, '../../语音与浏览器/messages') })
+  const remoteFolders = createRemoteFolders({ ...remoteFolderOptions, rpc: value })
+  const asyncQuestions = createAsyncQuestions({
+    dir: questionDir || path.join(dataDir, 'async-questions'),
+    deliver: async (record, answer, answerId) => {
+      await rootOf(record.sessionId, true)
+      const text = '用户补充回答了此前的澄清问题（不是新的授权）：\n问题编号：' + record.id + '\n原问题：' + record.question + '\n用户回答：' + answer + '\n请结合当前进度调整后续工作，勿重复已经完成的动作。'
+      // Queue admission is host-owned. Never replay an ambiguous response.
+      const out = await dsh('session.prompt', { sessionId: record.sessionId, mode: 'queue', content: [{ type: 'text', text }] }, 20000, answerId)
+      if (!out.ok || out.value?.accepted !== true) throw new Error(out.error?.message || '未确认回答已被会话接收')
+      return { status: 'accepted' }
+    },
+  })
   const push = new WebPush({ dir: dataDir, log })
   hub.onNotice((ev) => {
     const n = noticePayload(ev)
@@ -294,10 +356,14 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
 
   /** index.html with app.css/app.js inlined; rebuilt only when a file changes. */
   function buildShell() {
-    const files = ['index.html', 'app.css', 'app.js'].map((f) => path.join(WWW, f))
+    const files = ['index.html', 'folder-picker.css', 'app.css', 'folder-picker.js', 'app.js'].map((f) => path.join(WWW, f))
     const key = files.map((f) => { const s = fs.statSync(f); return `${s.mtimeMs}:${s.size}` }).join('|')
     if (shell && shell.key === key) return shell
-    const [html, css, js] = files.map((f) => fs.readFileSync(f, 'utf8'))
+    // HTML parsers normalize CRLF before CSP hashes are checked. Normalize
+    // before hashing too, including when a Windows editor rewrites app.js.
+    const [html, pickerCss, appCss, pickerJs, appJs] = files.map((f) => normalizeHtmlNewlines(fs.readFileSync(f, 'utf8')))
+    const css = `${pickerCss}\n${appCss}`
+    const js = `${pickerJs}\n;\n${appJs}`
     const jsHash = crypto.createHash('sha256').update(js).digest('base64')
     // Replacement functions, not strings: app.js contains `$` sequences that
     // String.replace would otherwise interpret as substitution patterns.
@@ -308,7 +374,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       raw,
       gz: zlib.gzipSync(raw, { level: 9 }),
       etag: `"${crypto.createHash('sha1').update(raw).digest('base64url')}"`,
-      csp: `default-src 'self'; script-src 'sha256-${jsHash}'; worker-src 'self'; manifest-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+      csp: `default-src 'self'; script-src 'sha256-${jsHash}'; worker-src 'self'; media-src 'self' blob:; manifest-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
     }
     return shell
   }
@@ -330,13 +396,43 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     fs.readFile(file, (err, buf) => {
       if (err) { res.writeHead(404); res.end(); return }
       // The service worker and manifest must update with the plugin, not a day later.
-      const fresh = /^(sw\.js|manifest\.webmanifest)$/.test(rel)
-      res.writeHead(200, { 'content-type': type, 'content-length': buf.length, 'cache-control': fresh ? 'no-cache' : 'public, max-age=86400' })
+      const fresh = /^(sw\.js|manifest\.webmanifest|tasks\.(html|css|js)|folder-picker\.(css|js))$/.test(rel)
+      const taskPolicy = rel === 'tasks.html' ? { 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'self'" } : {}
+      res.writeHead(200, { 'content-type': type, 'content-length': buf.length, 'cache-control': fresh ? 'no-cache' : 'public, max-age=86400', ...taskPolicy })
       res.end(buf)
     })
   }
 
   // ---- api ----------------------------------------------------------------
+
+  async function permissions(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId) throw Object.assign(new Error('missing sessionId'), { status: 400 })
+    const list = await value('session.list', {})
+    const session = list.items.find(s => s.sessionId === sessionId && s.origin !== 'subagent')
+    if (!session) throw Object.assign(new Error('找不到这个 DSH 对话'), { status: 404 })
+    const selection = session.projections?.values?.permissions
+    if (!selection || !Array.isArray(selection.options)) throw Object.assign(new Error('这个对话暂不支持权限切换'), { status: 409 })
+    return selection
+  }
+
+  async function selectPermission(payload) {
+    const { sessionId, preset } = payload
+    if (!PERMISSION_PRESETS.has(preset)) throw Object.assign(new Error('无效的权限模式'), { status: 400 })
+    if (permissionWrites.has(sessionId)) throw Object.assign(new Error('正在切换权限，请稍候'), { status: 409 })
+    permissionWrites.add(sessionId)
+    try {
+      const before = await permissions(sessionId)
+      if (!before.options.some(o => o.value === preset)) throw Object.assign(new Error('当前电脑不支持这个权限模式'), { status: 409 })
+      if (before.currentValue === preset) return before
+      if (preset === 'danger-full-access' && payload.confirmFullAccess !== true) throw Object.assign(new Error('请先确认启用完全访问'), { status: 400 })
+      // The native picker invokes commands/execute, never a model prompt.
+      const result = await value('commands/execute', { args: { agentId: sessionId, line: '/permission ' + preset, images: [] } })
+      if (result?.result?.kind !== 'success') throw Object.assign(new Error(result?.result?.text || '电脑未执行权限切换'), { status: 409 })
+      const after = await permissions(sessionId)
+      if (after.currentValue !== preset) throw Object.assign(new Error('权限状态已变化，请重新查看后再操作'), { status: 409 })
+      return after
+    } finally { permissionWrites.delete(sessionId) }
+  }
 
   async function boot() {
     const [ws, sl] = await Promise.all([value('workspace.list', {}), value('session.list', {})])
@@ -348,9 +444,12 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     for (const s of sl.items) {
       if (s.origin === 'subagent' || archived.has(s.sessionId)) continue
       const w = owner.get(s.sessionId) || null
-      if (s.blank) { if (w && !blanks[w] && !s.running) blanks[w] = s.sessionId; continue }
+      const questions = w ? await asyncQuestions.list(s.sessionId) : []
+      const aq = questions.filter(q => !q.answer || !['accepted', 'not-needed'].includes(q.delivery)).length
+      if (s.blank && !voices.has(s.sessionId) && !questions.length) { if (w && !blanks[w] && !s.running) blanks[w] = s.sessionId; continue }
       const v = (s.projections && s.projections.values) || {}
       const row = { id: s.sessionId, title: typeof v.title === 'string' ? v.title : '', at: s.updatedAt, run: s.running, w }
+      if (aq) row.aq = aq
       // Context-window use, only when it starts to matter: the chat header warns from 70%.
       const u = foldUsage(v)
       if (u && u.ctxPct >= 50) row.cx = u.ctxPct
@@ -433,7 +532,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   // ---- result viewer --------------------------------------------------------
 
   let wsCache = null
-  async function rootOf(sessionId) {
+  async function rootOf(sessionId, fresh = false) {
     if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400, code: 'bad-request' })
     if (sessionId.startsWith('agent:')) {
       if (!externalAgents) throw Object.assign(new Error('当前仅同步 DSH 自己的项目'), { status: 403, code: 'external-agents-disabled' })
@@ -441,7 +540,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       if (!s || !s.cwd) throw Object.assign(new Error('不知道这个会话的项目目录'), { status: 404, code: 'no-workspace' })
       return s.cwd
     }
-    if (!wsCache || Date.now() - wsCache.at > 10000) wsCache = { at: Date.now(), v: await value('workspace.list', {}) }
+    if (fresh || !wsCache || Date.now() - wsCache.at > 10000) wsCache = { at: Date.now(), v: await value('workspace.list', {}) }
     const w = wsCache.v.items.find((x) => (x.sessionIds || []).includes(sessionId))
     if (!w || !w.path) throw Object.assign(new Error('这个对话不属于任何工作区，没有可查看的文件'), { status: 404, code: 'no-workspace' })
     return w.path
@@ -472,10 +571,11 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   }
 
   async function raw(url, req, res) {
+    const download = url.searchParams.get('download') === '1'
     let { real, stat } = await confine(await rootOf(url.searchParams.get('s')), url.searchParams.get('path'))
     let type = MEDIA[path.extname(real).toLowerCase()]
     if (!stat.isFile() || !type) throw Object.assign(new Error('这种文件不能直接打开'), { status: 415, code: 'unsupported' })
-    if (url.searchParams.get('quality') === 'preview' && type.startsWith('video/')) {
+    if (!download && url.searchParams.get('quality') === 'preview' && type.startsWith('video/')) {
       const p = previews.request(real, stat)
       if (p.state !== 'ready') throw Object.assign(new Error('流畅预览正在准备'), { status: 409, code: 'preview-not-ready' })
       real = p.file; stat = await fs.promises.stat(real); type = 'video/mp4'
@@ -485,7 +585,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       'x-content-type-options': 'nosniff',
       // An SVG opened directly must not run script.
       'content-security-policy': "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox",
-      'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(path.basename(real))}`,
+      'content-disposition': `${download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(path.basename(real)).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())}`,
     }
     const range = parseRange(req.headers.range, stat.size)
     if (range === false) { res.writeHead(416, { ...headers, 'content-range': `bytes */${stat.size}` }); res.end(); return }
@@ -522,8 +622,96 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     const isPost = req.method === 'POST'
     if (isPost && !/^application\/json\b/.test(req.headers['content-type'] || '')) return json(req, res, 415, { ok: false, error: { code: 'bad-content-type', message: 'application/json required' } })
     try {
+      if (route === 'suggestions') {
+        if (!isPost) return json(req,res,405,{ok:false,error:{message:'POST required'}})
+        const body=await readJson(req,2048),sid=body.sessionId
+        if(typeof sid!=='string'||!/^session-[a-zA-Z0-9-]{1,160}$/.test(sid))return json(req,res,400,{ok:false,error:{message:'无效会话'}})
+        await rootOf(sid)
+        if(typeof suggestionProvider!=='function')return json(req,res,200,{ok:true,value:{text:'',revision:''}})
+        const controller=new AbortController(),abort=()=>{if(!res.writableEnded)controller.abort()};res.on('close',abort)
+        try{const result=await suggestionProvider(sid,controller.signal);if(!res.destroyed)return json(req,res,200,{ok:true,value:result})}finally{res.off('close',abort)}
+        return
+      }
+      if (route === 'folders' || route === 'folders/workspace') {
+        if (route === 'folders' && req.method === 'GET') return json(req, res, 200, { ok: true, value: await remoteFolders.list(url.searchParams.get('path')) })
+        if (route === 'folders/workspace' && isPost) return json(req, res, 200, { ok: true, value: await remoteFolders.add(await readJson(req, 8192)) })
+        return json(req, res, 405, { ok: false, error: { code: 'method-not-allowed', message: '不支持的文件夹操作' } })
+      }
+      if (route === 'async-questions' || route === 'async-questions/create') {
+        if (!['GET', 'POST'].includes(req.method)) return json(req, res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'unsupported method' } })
+        const body = isPost ? await readJson(req, 32768) : null
+        const sid = isPost ? body.s : url.searchParams.get('s')
+        if (typeof sid !== 'string' || !sid.startsWith('session-')) throw Object.assign(new Error('仅支持当前 DSH 会话'), { status: 400 })
+        await rootOf(sid, true)
+        if (route.endsWith('/create')) {
+          if (!isPost) return json(req, res, 405, { ok: false, error: { message: 'POST required' } })
+          if (body.kind !== 'clarification') throw Object.assign(new Error('审批与必要确认不能设置超时继续'), { status: 400 })
+          if (typeof body.independentWork !== 'string' || !body.independentWork.trim()) throw Object.assign(new Error('必须说明不依赖答案也能继续的工作'), { status: 400 })
+          const record = await asyncQuestions.create({ sessionId: sid, kind: 'clarification', question: body.question, options: body.options || [], independentWork: body.independentWork, waitMs: 60000, requestId: body.requestId })
+          const abort = new AbortController()
+          const cancelled = () => { if (!res.writableEnded) abort.abort() }
+          res.on('close', cancelled)
+          try { return json(req, res, 200, { ok: true, value: await asyncQuestions.wait(record.id, { signal: abort.signal }) }) }
+          finally { res.off('close', cancelled) }
+        }
+        if (!isPost) return json(req, res, 200, { ok: true, value: { items: await asyncQuestions.list(sid) } })
+        return json(req, res, 200, { ok: true, value: await asyncQuestions.answer(sid, body.id, { answer: body.answer, answerId: body.answerId }) })
+      }
+      if (route === 'voice' || route === 'voice/audio' || route === 'voice/events') {
+        if (route === 'voice/events' && req.method !== 'GET') return json(req, res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'voice events require GET' } })
+        if (!['GET', 'HEAD', 'POST'].includes(req.method) || (route === 'voice/audio' && isPost)) return json(req, res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'unsupported voice method' } })
+        const body = isPost ? await readJson(req, MAX_AUDIO * 4 / 3 + 200000) : null
+        const s = voiceSession(isPost ? body?.s : url.searchParams.get('s'))
+        const workspace = await rootOf(s, true)
+        if (!(await fs.promises.stat(workspace)).isDirectory()) throw Object.assign(new Error('对话工作区不存在'), { status: 404 })
+        if (route === 'voice/events') { await fs.promises.access(workspace, fs.constants.R_OK); return subscribeVoice(s, req, res) }
+        if (route === 'voice' && isPost) {
+          const item = voices.put(body)
+          voiceSaved(s, item)
+          return json(req, res, 200, { ok: true, value: item })
+        }
+        if (route === 'voice') return json(req, res, 200, { ok: true, value: { items: voices.list(s) } })
+        const { mime, bytes } = voices.audio(s, url.searchParams.get('id'), { group: url.searchParams.get('group') === '1', rev: url.searchParams.get('rev') })
+        const headers = { 'content-type': mime, 'cache-control': 'private, no-store', 'accept-ranges': 'bytes', 'x-content-type-options': 'nosniff' }
+        const range = parseRange(req.headers.range, bytes.length)
+        if (range === false) { res.writeHead(416, { ...headers, 'content-range': `bytes */${bytes.length}` }); res.end(); return }
+        const { start, end } = range || { start: 0, end: bytes.length - 1 }
+        res.writeHead(range ? 206 : 200, { ...headers, 'content-length': end - start + 1, ...(range ? { 'content-range': `bytes ${start}-${end}/${bytes.length}` } : {}) })
+        res.end(req.method === 'HEAD' ? undefined : bytes.subarray(start, end + 1)); return
+      }
       if (!externalAgents && route.startsWith('agents/') && route !== 'agents/hook') return json(req, res, 403, { ok: false, error: { code: 'external-agents-disabled', message: '当前仅同步 DSH 自己的项目' } })
       if (route === 'ping' && !isPost) return json(req, res, 200, { ok: true, t: Date.now() })
+      if (route === 'desktop/screenshot' && isPost) {
+        // The phone relay rewrites Host/Origin. Require the untouched browser
+        // Referer as well, so a remote /m page cannot open the PC capture UI.
+        const localPeer = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)
+        let localPage = false
+        try {
+          const origin = new URL(req.headers.origin), page = new URL(req.headers.referer)
+          localPage = LOOPBACK.has(origin.hostname) && origin.host === req.headers.host && page.origin === origin.origin && page.pathname === '/' && /^https?:$/.test(origin.protocol)
+        } catch {}
+        if (!localPeer || !localPage || !trusted(req) || req.headers['x-forwarded-for'] || req.headers.forwarded || /Android|iPhone|iPad|DSHApp/i.test(req.headers['user-agent'] || '')) return json(req, res, 403, { ok: false, error: { code: 'local-only', message: '请在这台电脑的 DSH 对话中点击截图' } })
+        await readJson(req, 4096)
+        return json(req, res, 200, { ok: true, value: await screenshots.connection() })
+      }
+      if (route === 'desktop/workspace' && isPost) {
+        const localPeer = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)
+        if (!localPeer || !trusted(req) || req.headers['x-forwarded-for'] || req.headers.forwarded) return json(req, res, 403, { ok: false, error: { code: 'local-only', message: '请在电脑上的 DSH App 中选择文件夹' } })
+        if (folderPick) return json(req, res, 409, { ok: false, error: { code: 'picker-busy', message: '文件夹选择窗口已打开' } })
+        const controller = new AbortController()
+        folderPick = controller
+        const abort = () => { if (!res.writableEnded) controller.abort() }
+        res.on('close', abort)
+        try {
+          const selected = await pickDirectory(controller.signal)
+          if (controller.signal.aborted) return
+          if (selected === null) return json(req, res, 200, { ok: true, value: { cancelled: true } })
+          // Only the OS chooser supplies a path. Request bodies cannot inject one.
+          if (typeof selected !== 'string' || !path.isAbsolute(selected) || !(await fs.promises.stat(selected)).isDirectory()) throw new Error('请选择存在的文件夹')
+          const workspace = await value('workspace.create', { path: selected })
+          return json(req, res, 200, { ok: true, value: workspace })
+        } finally { res.removeListener('close', abort); folderPick = null }
+      }
       if (route === 'boot' && !isPost) return json(req, res, 200, { ok: true, value: await boot() })
       if (route === 'history' && !isPost) return json(req, res, 200, { ok: true, value: await history(url) })
       if (route === 'img' && !isPost) return await image(url, req, res)
@@ -544,6 +732,8 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       }
       if (route === 'rpc' && isPost) {
         const body = await readJson(req, 48 * 1024 * 1024)
+        if (body.method === 'session.permissions') return json(req, res, 200, { ok: true, value: await permissions(body.payload?.sessionId) })
+        if (body.method === 'session.selectPermission') return json(req, res, 200, { ok: true, value: await selectPermission(body.payload || {}) })
         if (!RPC_ALLOW.has(body.method)) return json(req, res, 400, { ok: false, error: { code: 'method-not-allowed', message: String(body.method) } })
         // A caller-minted rpcId comes back as user/message source.rpcId, which is
         // how the phone reconciles its optimistic "sending" bubble.
@@ -627,6 +817,15 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       }
       return json(req, res, 404, { ok: false, error: { code: 'not-found', message: route } })
     } catch (err) {
+      if (route === 'folders' || route === 'folders/workspace') {
+        const known = ['folders', 'outcome_unknown'].includes(err.code)
+        return json(req, res, err.status && err.status < 500 ? err.status : 503, { ok: false, error: { code: known ? err.code : 'folders', message: known ? err.message : '电脑文件夹暂时不可用，请稍后刷新' } })
+      }
+      if (route === 'voice' || route === 'voice/audio' || route === 'voice/events') {
+        const known = err.code === 'voice-storage' || err.code === 'no-workspace' || err.status === 413 || err.status === 400
+        const status = known ? (err.status || 400) : (err.code === 'ENOENT' ? 404 : 503)
+        return json(req, res, status, { ok: false, error: { code: 'voice-storage', message: known ? err.message : (status === 404 ? '对话工作区或语音不存在' : '语音存储暂时不可用，请稍后重试') } })
+      }
       const status = err.status || 502
       if (status >= 500) log(`api ${route} failed: ${err.message}`)
       if (!res.headersSent) json(req, res, status, { ok: false, error: { code: err.code || (err.name === 'TimeoutError' ? 'timeout' : 'upstream'), message: err.message } })
@@ -660,6 +859,11 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   }
 
   function close() {
+    voiceStopped = true
+    for (const watchers of [...voiceWatchers.values()]) for (const watcher of [...watchers]) watcher.close()
+    screenshots.close()
+    asyncQuestions.close()
+    if (folderPick) folderPick.abort()
     previews.close()
     clearTimeout(hubTimer)
     clearTimeout(hookTimer)
@@ -777,6 +981,7 @@ class Bridge {
       case 'session/queue': return this.send({ t: 'queue', s, items: foldQueue(f.items) })
       case 'session/projection':
         if (f.key === 'title' && typeof f.value === 'string') this.send({ t: 'title', s, title: f.value })
+        if (f.key === 'permissions') this.send({ t: 'permissions', s, value: f.value })
         return
       case 'stream/error': return this.send({ t: 'err', msg: f.error && f.error.message })
     }

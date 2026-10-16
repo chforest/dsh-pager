@@ -22,6 +22,7 @@
   <section id="home" class="page on" aria-label="对话列表">
     <header class="bar">
       <div class="brand"><span class="logo">DSH</span><span id="status" class="status"><i></i><em></em></span></div>
+      <a class="market-entry" href="/m/market.html?v=20261012-2" aria-label="打开插件市场">插件</a>
       <button id="btnSearch" class="ib" data-ic="search" aria-label="搜索"></button>
     </header>
     <div id="searchBox" class="searchbox" hidden>
@@ -53,9 +54,15 @@
       <div class="crow">
         <button id="attach" class="ib" data-ic="image" aria-label="添加图片"></button>
         <button id="quick" class="ib" data-ic="zap" aria-label="快捷指令"></button>
-        <textarea id="input" rows="1" placeholder="发消息给 DSH" enterkeyhint="enter"></textarea>
+        <button id="mic" class="ib" data-ic="mic" aria-label="语音输入"></button>
+        <button id="voiceKeyboard" class="ib voice-keyboard" aria-label="切回键盘" hidden>⌨</button><button id="holdTalk" class="hold-talk" hidden>按住说话</button>
+        <div id="inputWrap" class="input-wrap"><textarea id="input" rows="1" placeholder="发消息给 DSH" enterkeyhint="enter"></textarea><button id="inputSuggestion" class="input-suggestion" aria-label="采用输入建议" hidden></button></div>
         <button id="send" class="send" aria-label="发送"></button>
       </div>
+      <div id="holdHint" class="hold-hint" role="status" hidden></div>
+      <button id="voiceRetryReplies" class="link" hidden>重试保存回复</button>
+      <div id="voiceBar" class="voice-bar" hidden><span id="voiceState" role="status"></span><button id="voiceFinish" class="link">结束录音</button><button id="voiceEnd" class="link">退出</button><span id="voiceCaption" aria-live="polite" style="flex-basis:100%;white-space:pre-wrap;max-height:6em;overflow:auto"></span></div>
+      <button id="permission" class="permission" aria-label="切换权限" aria-haspopup="dialog" hidden></button>
       <input id="file" type="file" accept="image/*" multiple hidden>
     </footer>
   </section>
@@ -73,8 +80,12 @@
     <div id="fvBody" class="scroll fvb"></div>
   </div>
   <div id="viewer" class="viewer" hidden><img alt=""></div>
+  <section id="callPanel" class="call-panel" role="dialog" aria-label="与 DSH 语音通话" hidden><div class="call-avatar">DSH</div><h2>语音通话</h2><time id="callClock">00:00</time><p id="callState" role="status">正在接通…</p><div id="callCaption" class="call-caption" aria-live="polite"></div><div class="call-actions"><button id="callMute" aria-pressed="false">静音</button><button id="callInterrupt">打断并说</button><button id="callHangup" class="hangup">挂断</button></div></section>
   <div id="toast" class="toast" role="status"></div>
 </div>
+<!-- folder-picker.js/css are concatenated into the existing hashed assets by the server. -->
 <!--JS-->
 </body>
 </html>
+
+
