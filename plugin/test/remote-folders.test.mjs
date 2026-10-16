@@ -2,15 +2,17 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import os from 'node:os'
 import crypto from 'node:crypto'
 import http from 'node:http'
 import { createRemoteFolders } from '../remote-folders.js'
 import { createMobile } from '../server.js'
 
+// Real drive letters and junctions are a Windows integration contract.
+const windowsTest = (name, fn) => test(name, { skip: process.platform !== 'win32' ? 'Windows local drives and junctions only' : false }, fn)
+
 function fixture(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-folder-'))
-  for (const name of ['中文 空格', '另一个', '.dsh', '.ssh', '.aws', 'secrets']) fs.mkdirSync(path.join(dir, name))
+  const dir = fs.mkdtempSync(path.join(process.cwd(), '.remote-folder-test-'))
+  for (const name of ['中文 空格', '另一个', '.dsh', '.ssh', '.aws', 'secrets', 'AppData']) fs.mkdirSync(path.join(dir, name))
   fs.writeFileSync(path.join(dir, '不应读取.txt'), 'private fixture content')
   fs.symlinkSync(path.join(dir, '中文 空格'), path.join(dir, '安全入口'), 'junction')
   fs.symlinkSync(path.join(dir, '.dsh'), path.join(dir, '敏感入口'), 'junction')
@@ -28,25 +30,26 @@ function fixture(t) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   return { dir, rpc, calls, workspaces, options }
 }
-test('folder root is a bounded directory-only picker; private names and junction targets stay hidden', async t => {
+windowsTest('folder root is a bounded directory-only picker; private names and junction targets stay hidden', async t => {
   const f = fixture(t), folders = createRemoteFolders(f.options)
   const root = await folders.list()
   assert.equal(root.path, null); assert.deepEqual(root.entries, []); assert.equal(root.roots.length, 1)
   assert.equal(f.calls.some(c => c.method !== 'workspace.list'), false)
+  await assert.rejects(folders.safeDirectory(path.join(f.dir, 'AppData')), { status: 403 })
   const level = await folders.list(f.dir)
   assert.deepEqual(level.entries.map(e => e.name).sort(), ['中文 空格', '另一个', '安全入口'].sort())
   assert.equal(level.entries.find(e => e.name === '安全入口').path, await fs.promises.realpath(path.join(f.dir, '中文 空格')))
   assert.equal(level.parent, path.dirname(level.path))
   assert.equal((await createRemoteFolders({ ...f.options, maxEntries: 1 }).list(f.dir)).truncated, true)
-  for (const p of ['\\server\share', '\\?\C:\Windows', 'C:relative', 'C:\name:stream', 'C:\null\0path', path.join(f.dir, '.dsh'), path.join(f.dir, '敏感入口'), path.join(f.dir, '不应读取.txt'), 'Z:\network']) await assert.rejects(folders.safeDirectory(p))
+  for (const p of ['\\server\share', '\\?\C:\Windows', 'C:relative', 'C:\name:stream', 'C:\null\0path', path.join(f.dir, '.dsh'), path.join(f.dir, 'AppData'), path.join(f.dir, '敏感入口'), path.join(f.dir, '不应读取.txt'), 'Z:\network']) await assert.rejects(folders.safeDirectory(p))
 })
-test('network junction is rejected before following its target', async t => {
+windowsTest('network junction is rejected before following its target', async t => {
   const f = fixture(t), folders = createRemoteFolders(f.options), nativeReadlink = fs.promises.readlink
   fs.promises.readlink = async p => path.basename(p) === '安全入口' ? '\\server\private-share' : nativeReadlink(p)
   try { await assert.rejects(folders.safeDirectory(path.join(f.dir, '安全入口')), { status: 403 }) }
   finally { fs.promises.readlink = nativeReadlink }
 })
-test('workspace confirmation is serial and canonical-idempotent, with no sessions or model requests', async t => {
+windowsTest('workspace confirmation is serial and canonical-idempotent, with no sessions or model requests', async t => {
   const f = fixture(t), folders = createRemoteFolders(f.options), requestId = crypto.randomUUID(), selected = path.join(f.dir, '中文 空格')
   const first = await folders.add({ path: selected, requestId })
   assert.equal(first.created, true); assert.equal(first.workspace.id, first.workspace.workspaceId)
@@ -60,7 +63,7 @@ test('workspace confirmation is serial and canonical-idempotent, with no session
   assert.equal((await folders.list()).workspaces.length, 2)
   assert.ok(f.calls.every(c => ['workspace.list', 'workspace.create'].includes(c.method)))
 })
-test('unknown registration does not replay; native list can later reconcile it', async t => {
+windowsTest('unknown registration does not replay; native list can later reconcile it', async t => {
   const f = fixture(t); let writes = 0
   const folders = createRemoteFolders({ ...f.options, rpc: async (method, payload) => { if (method === 'workspace.create') { writes++; throw Error('lost receipt') }; return f.rpc(method, payload) } })
   const input = { path: path.join(f.dir, '中文 空格'), requestId: crypto.randomUUID() }
@@ -69,7 +72,7 @@ test('unknown registration does not replay; native list can later reconcile it',
   f.workspaces.push({ workspaceId: 'late-id', title: 'late', path: input.path })
   const reconciled = await folders.add(input); assert.equal(reconciled.workspace.id, 'late-id'); assert.equal(writes, 1)
 })
-test('drive enumeration timeout keeps last success and first failure is explicit and retryable', async t => {
+windowsTest('drive enumeration timeout keeps last success and first failure is explicit and retryable', async t => {
   const f = fixture(t); let clock = 0, calls = 0, broken = false
   const exec = (_exe, _args, _options, callback) => { calls++; queueMicrotask(() => callback(broken ? Error('timeout') : null, broken ? '' : f.dir[0] + ':3\n')) }
   f.workspaces.push({ workspaceId: 'existing', title: 'fixture', path: path.join(f.dir, '中文 空格') })
@@ -82,7 +85,7 @@ test('drive enumeration timeout keeps last success and first failure is explicit
   broken = false
   const recovered = await newInstance.list(); assert.equal(recovered.roots.length, 1); assert.equal(recovered.workspaces.length, 1)
 })
-test('real folders HTTP endpoints retain trust and do not expose workspace.create via generic RPC', async t => {
+windowsTest('real folders HTTP endpoints retain trust and do not expose workspace.create via generic RPC', async t => {
   const f = fixture(t)
   const upstream = http.createServer(async (req, res) => {
     if (req.method !== 'POST') { res.writeHead(404); res.end(); return }
