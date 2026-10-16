@@ -1,0 +1,69 @@
+{
+  "name": "dshmarket",
+  "version": "1.66.17",
+  "url": "https://registry.npmjs.org/dshmarket/-/dshmarket-1.66.17.tgz",
+  "integrity": "sha512-xpTd782/Cje/OSJsQEY9ntvDkuPsEzPDmQNktQl6IWAQDbh0Wm2VICRf57nYwcp5JnuWWwVtfgWFMth4Xhk3ww==",
+  "files": [
+    {
+      "file": "client/client.js",
+      "before": "54113cb9189aac409a48710d02a7e5a69ae09f5284a728417ab29d0b8a6ad664",
+      "after": "d5f02d8854d6660826e33ce36cdd42e6951d9fb832981b4c6da24930ba257fd8",
+      "replacements": [
+        [
+          "const [sortField, setSortField] = (0, react.useState)(\"downloads\");",
+          "const [sortField, setSortField] = (0, react.useState)(\"stars\");"
+        ],
+        [
+          "const [catsOpen, setCatsOpen] = (0, react.useState)(false);",
+          "const [catsOpen, setCatsOpen] = (0, react.useState)(true);"
+        ],
+        [
+          "filter: \"筛选\",",
+          "filter: \"排序与筛选\","
+        ],
+        [
+          "sortStars: \"Star 数\",",
+          "sortStars: \"GitHub 星标数\","
+        ],
+        [
+          "const hasRecent = recentlyAdded.length > 0",
+          "const hasRecent = sortField === \"added\" && recentlyAdded.length > 0"
+        ]
+      ]
+    },
+    {
+      "file": "src/client/MarketSection.tsx",
+      "before": "2bfb9eae9aceab32d201311b02c2fd7db530cc2a44be3254d6161f247c155288",
+      "after": "2879edf74c29f2d43263b5d964052a1d510487c1c9f88abc9295ff078979dc19",
+      "replacements": [
+        [
+          "const [sortField, setSortField] = useState<SortField>('downloads')",
+          "const [sortField, setSortField] = useState<SortField>('stars')"
+        ],
+        [
+          "const [catsOpen, setCatsOpen] = useState(false)",
+          "const [catsOpen, setCatsOpen] = useState(true)"
+        ],
+        [
+          "const hasRecent = recentlyAdded.length > 0",
+          "const hasRecent = sortField === 'added' && recentlyAdded.length > 0"
+        ]
+      ]
+    },
+    {
+      "file": "src/client/locales.ts",
+      "before": "5a0950ba684f014a05e4e18b8999c704612b46881bd1ab9ebf2458290f46ae71",
+      "after": "5d0c6c1b4d92ce72f28e8bb49125731278f11272603504701533d67bb2ef93a2",
+      "replacements": [
+        [
+          "filter: '筛选',",
+          "filter: '排序与筛选',"
+        ],
+        [
+          "sortStars: 'Star 数',",
+          "sortStars: 'GitHub 星标数',"
+        ]
+      ]
+    }
+  ]
+}

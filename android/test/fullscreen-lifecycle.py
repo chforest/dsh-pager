@@ -83,9 +83,10 @@ class MainActivity extends Activity {
     WebChromeClient.CustomViewCallback fullscreenCallback;
     int fullscreenSystemUi, fullscreenOrientation;
     boolean wasFullscreen;
-    int shares;
+    int shares, microphoneCancels;
     MainActivity() { window.content.addView(web); window.decor.ui=8192; window.attrs.flags=32; }
     void handleShare(Intent value) { shares++; }
+    void cancelMicrophoneRequest() { microphoneCancels++; }
 __METHODS__
 }
 class Callback implements WebChromeClient.CustomViewCallback {
@@ -111,7 +112,7 @@ public class FullscreenLifecycleCheck {
         MainActivity existing=new MainActivity(); existing.window.attrs.flags|=1024; existing.showFullscreen(new View(),new Callback()); existing.hideFullscreen();
         check(existing.window.attrs.flags==(32|1024),"preexisting fullscreen flag remains after exit");
         MainActivity dying=new MainActivity(); View dyingView=new View(); Callback dyingCb=new Callback(); dying.showFullscreen(dyingView,dyingCb); dying.onDestroy();
-        check(dying.fullscreenView==null && dying.fullscreenCallback==null && dyingView.parent==null && dyingCb.calls==1 && dying.destroys==1,"activity destroy removes overlay and releases callback once");
+        check(dying.fullscreenView==null && dying.fullscreenCallback==null && dyingView.parent==null && dyingCb.calls==1 && dying.destroys==1 && dying.microphoneCancels==1,"activity destroy removes overlay and releases callback once");
         dying.exitFullscreen();
         check(dyingCb.calls==1,"repeated exit cannot re-notify a released callback");
         MainActivity navigation=new MainActivity(); View navigationView=new View(); Callback navigationCb=new Callback(); navigation.showFullscreen(navigationView,navigationCb);

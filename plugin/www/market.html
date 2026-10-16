@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://avatars.githubusercontent.com; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="theme-color" content="#f5f6f8">
+<title>插件市场 · DSH</title>
+<link rel="stylesheet" href="/m/market.css?v=20261012-2">
+</head>
+<body>
+<header class="top"><a href="/m/" aria-label="返回 DSH">‹</a><div><h1>插件市场</h1><small>电脑、手机和平板共用</small></div><button id="refresh" aria-label="刷新插件目录">刷新</button></header>
+<main>
+  <nav class="tabs" aria-label="市场页面"><button id="discover" aria-pressed="true">发现插件</button><button id="installed" aria-pressed="false">已安装</button></nav>
+  <section class="filters" aria-label="搜索与排序">
+    <input id="search" type="search" placeholder="搜索插件或功能，例如 GitHub、视频" aria-label="搜索插件">
+    <div class="selects"><label for="category">分类<select id="category" aria-label="分类"><option value="all">全部分类</option></select></label><label for="sort">排序<select id="sort" aria-label="排序"><option value="stars">星标最多</option><option value="downloads">下载最多（近30天）</option><option value="added">最新收录</option><option value="name">名称 A–Z</option></select></label></div>
+  </section>
+  <p id="notice" role="status" aria-live="polite">正在连接电脑…</p>
+  <section id="uncertain" class="warning" hidden><p id="uncertainText"></p><button id="checkPending">核对安装状态</button><button id="releasePending">已核对电脑，解除待核对状态</button></section>
+  <div class="summary"><span id="count"></span><small id="updated"></small></div>
+  <section id="cards" class="cards" aria-label="插件列表"></section>
+  <button id="more" class="more" hidden>显示更多</button>
+  <p class="foot">社区插件 · 星标来自 GitHub，下载量为 npm 近30天数据</p>
+</main>
+<dialog id="detail" aria-labelledby="detailTitle"><div id="detailBody"></div></dialog>
+<script type="module" src="/m/market.js?v=20261012-2"></script>
+</body>
+</html>

@@ -403,9 +403,55 @@ audio.fvmedia { background: none; }
 .toast.err { background: rgba(200, 40, 48, 0.94); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+.market-entry { margin-left:auto; color:var(--muted, #737983); font-size:14px; text-decoration:none; padding:12px 8px; }
+.voice-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:8px 12px; font-size:12px; background:rgba(92,85,220,.07); border-radius:12px; margin:4px 0; }
+.voice-bar[hidden] { display:none; }
+.voice-bar span { flex:1; min-width:0; overflow-wrap:anywhere; }
+.voice-bar button { min-height:40px; flex-shrink:0; }
+#mic.recording { color:#dc405e; background:rgba(220,64,94,.08); }
+.permission { display: flex; align-items: center; gap: 6px; border: 0; border-radius: 10px; background: transparent; color: var(--muted, #737983); padding: 8px 12px; font: inherit; font-size: 13px; min-height: 40px; }
+.permission:active { background: rgba(128,128,128,.12); }
+.permission[hidden] { display: none; }
+.opt-row.permission-active { background: rgba(128,128,128,.10); border-radius: 12px; }
 @keyframes pulse { 50% { opacity: 0.35; } }
 @keyframes blink { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
 @keyframes shimmer { to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* Voice messages are durable audio; calls have their own full-screen surface. */
+.voice-history{align-self:flex-start;padding:8px 16px}.voice-items{max-height:42vh;overflow:auto;padding:12px;background:var(--bg,#f5f6fa)}.voice-message{background:#fff;border-radius:16px;margin:8px 4px;padding:12px;max-width:94%}.voice-message.mine{margin-left:20px;background:#e9edff}.voice-message small{display:block;color:#626978;margin:4px 0}.voice-message audio{display:block;width:100%;height:40px}.voice-message p{white-space:pre-wrap;margin:8px 0 0;font-size:14px}.call-panel{position:fixed;inset:0;z-index:60;background:linear-gradient(155deg,#101c38,#253f67);color:#fff;display:flex;align-items:center;flex-direction:column;padding:calc(env(safe-area-inset-top) + 9vh) 24px calc(env(safe-area-inset-bottom) + 5vh)}.call-panel[hidden]{display:none}.call-avatar{border-radius:50%;width:100px;height:100px;background:#6381e8;display:grid;place-items:center;font-size:26px;font-weight:700;box-shadow:0 0 70px #7297ff55}.call-panel h2{margin:24px 0 8px}.call-panel time{font-variant-numeric:tabular-nums;color:#ccd8f5}.call-panel p{font-size:14px;color:#d6e3ff;text-align:center}.call-caption{flex:1;overflow:auto;width:100%;max-width:620px;white-space:pre-wrap;font-size:20px;line-height:1.7;padding:20px 0}.call-actions{display:flex;gap:14px}.call-actions button{background:#ffffff24;color:#fff;border:0;border-radius:32px;min-height:56px;padding:0 20px}.call-actions .hangup{background:#e84e61}.call-actions button[aria-pressed=true]{background:#fff;color:#20375d}
+
+.voice-bubble{width:min(78vw,360px);max-width:100%;padding:8px 0}.voice-bubble audio{width:100%;display:block;height:42px}.voice-bubble small{display:block;font-size:12px;opacity:.7;margin:4px 0}.voice-transcript{white-space:pre-wrap;font-size:15px;line-height:1.5;margin-top:8px}.voice-delivery{color:#bd7b11}.voice-orphan{margin:12px 0}.u .voice-bubble{color:inherit}
+
+.voice-settings-divider{border-top:1px solid #8883;margin:10px 0}.speaker-row{display:flex;align-items:center;border-bottom:1px solid #8882}.speaker-row>button:first-child{flex:1;text-align:left;border:0;background:transparent;padding:16px 12px;color:inherit}.speaker-row small{display:block;opacity:.65;margin-top:5px}.speaker-row [aria-pressed=true] b{color:#4e67ed}#speakerPreview audio{width:100%;margin-top:12px}
+
+.call-record{display:flex;flex-direction:column;gap:5px;align-items:center;max-width:90%;margin:16px auto 24px;padding:14px 24px;background:#6d83b112;color:inherit;border:1px solid #7b8ba72b;border-radius:14px}.call-record span,.call-record small{font-size:12px;opacity:.7}.call-record small{color:#536de5}
+
+.speaker-options{min-height:0;overflow-y:auto;overscroll-behavior:contain}.speaker-options .speaker-row{flex-shrink:0}.speaker-options .speaker-row>button:first-child{min-width:0}.speaker-options small{white-space:normal;line-height:1.5}
+
+.voice-unmatched{margin:20px 0;border-top:1px solid #8882;padding:8px 0;color:var(--text2)}.voice-unmatched>summary{cursor:pointer;font-size:13px;padding:12px 4px}.voice-unmatched>p{font-size:12px;line-height:1.6;opacity:.7;margin:0 4px 12px}.speaker-preview-status{font-size:13px;line-height:1.5;color:var(--text2);padding:8px 4px}.a+.process{margin-top:4px}
+
+.speaker-row{flex-wrap:wrap}.speaker-preview-inline{flex-basis:100%;width:100%;padding:0 10px 12px}.speaker-preview-inline audio{width:100%;height:42px}.speaker-preview-inline .speaker-preview-status{margin:0}
+
+.voice-bar.dictation{justify-content:space-between;gap:12px}.voice-bar.dictation #voiceState{font-size:12px;opacity:.7}.voice-bar.dictation #voiceCaption,.voice-bar.dictation #voiceEnd{display:none}.voice-bar.dictation #voiceFinish{font-weight:600}
+
+.video-options{flex-wrap:wrap}.video-options [data-video-download]{font-weight:600}.video-download-state{margin:0;padding:4px 12px 12px;font-size:12px;line-height:1.5;color:var(--text2)}
+
+.async-question .qin{display:block;width:100%;min-height:72px;resize:vertical;font:inherit}.async-independent,.async-hint{font-size:12px;line-height:1.5;color:var(--text2);margin:8px 12px}.async-answer{white-space:pre-wrap;margin:12px}.async-history{font-size:12px;color:var(--text2);padding:8px 12px}.async-history>summary{padding:8px 0;cursor:pointer}.async-history-item{border-top:1px solid #8882;padding:10px 0}.async-history-item p{white-space:pre-wrap;margin:6px 0 0}
+
+.tag.async-pending{color:#5067b6;background:#6279bf12}
+
+.voice-history-pending{font-size:12px;color:var(--text3);line-height:1.5;margin:0 12px 12px}.voice-awaiting .voice-delivery{color:var(--text3)}
+
+.hold-talk{flex:1;min-width:0;height:46px;border:1px solid #d4d8df;border-radius:12px;background:#f5f6f8;color:var(--text);font-size:16px;font-weight:600;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}.hold-talk.holding{background:#dce9dc;border-color:#65ae72}.hold-talk.cancel{background:#f6dcdc;border-color:#d97171;color:#a42f2f}.hold-hint{text-align:center;font-size:12px;color:var(--text3);padding:4px}.voice-keyboard{font-size:25px}.hold-talk[hidden],.voice-keyboard[hidden],.hold-hint[hidden]{display:none}
+
+.voice-bubble audio[hidden]{display:none}.voice-play{display:flex;align-items:center;gap:14px;min-height:48px;min-width:140px;max-width:100%;border:0;border-radius:12px;background:#e8f0e9;padding:10px 16px;color:#245c37;font-size:16px}.u .voice-play{background:#c4eaa8;color:#24451a}.voice-wave{display:flex;align-items:center;gap:3px;height:24px}.voice-wave i{width:3px;height:9px;border-radius:2px;background:currentColor}.voice-wave i:nth-child(2n){height:17px}.voice-wave i:nth-child(3){height:23px}.voice-play.playing .voice-wave{opacity:.6}.voice-text{margin-top:6px}.voice-text>summary{font-size:12px;opacity:.7;cursor:pointer;padding:5px 0}.voice-text[open]>summary{margin-bottom:4px}
+
+.voice-play{user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:pan-y}.voice-text[hidden]{display:none!important}.voice-text{margin-top:8px}.voice-pending-hint{font-size:13px;padding:0 12px;color:var(--text2)}
+
+.u .voice-user{max-width:100%;color:var(--text)}.u .voice-user .voice-bubble{width:auto;padding:0}.u .voice-user .voice-play{margin-left:auto}.u .voice-user .voice-text{max-width:78vw;background:var(--surface);color:var(--text);padding:10px 12px;border-radius:12px}.u .voice-user .voice-transcript{margin-top:0}.u.pending .voice-user{opacity:.6}
+
+.input-wrap{position:relative;flex:1;min-width:0}.input-wrap[hidden]{display:none}.input-wrap #input{display:block;width:100%;box-sizing:border-box}.input-suggestion{position:absolute;inset:0;display:block;width:100%;border:0;border-radius:22px;background:transparent;color:var(--text3,#8b8f98);opacity:.72;text-align:left;padding:10px 16px;font:inherit;font-size:16px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}.input-suggestion[hidden]{display:none}.input-suggestion:focus-visible{outline:2px solid #6375ef;outline-offset:-2px}
+

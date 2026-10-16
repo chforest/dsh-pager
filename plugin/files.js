@@ -125,11 +125,11 @@ function isBinary(buf) {
 export async function describe(root, p) {
   const { real, rel, stat } = await confine(root, p)
   const relPosix = rel.split(path.sep).join('/')
-  if (stat.isDirectory()) return { kind: 'dir', ...(await list(root, p)) }
+  if (stat.isDirectory()) return { kind: 'dir', ...(await list(root, p)), absolutePath: real }
   if (!stat.isFile()) throw fail(400, 'not-file', '不是普通文件')
   const name = path.basename(real)
   const ext = path.extname(name).toLowerCase()
-  if (MEDIA[ext]) return { kind: 'media', rel: relPosix, name, size: stat.size, at: stat.mtimeMs, type: MEDIA[ext] }
+  if (MEDIA[ext]) return { kind: 'media', rel: relPosix, name, size: stat.size, at: stat.mtimeMs, type: MEDIA[ext], absolutePath: real }
   const fh = await fs.promises.open(real, 'r')
   let buf
   try {
@@ -137,11 +137,11 @@ export async function describe(root, p) {
     buf = Buffer.alloc(len)
     await fh.read(buf, 0, len, 0)
   } finally { await fh.close() }
-  if (isBinary(buf)) return { kind: 'binary', rel: relPosix, name, size: stat.size, at: stat.mtimeMs }
+  if (isBinary(buf)) return { kind: 'binary', rel: relPosix, name, size: stat.size, at: stat.mtimeMs, absolutePath: real }
   const truncated = stat.size > TEXT_MAX
   const { text, enc } = decodeText(buf, truncated)
   if (looksSecret(text)) throw fail(403, 'secret', '内容疑似包含密钥，已拦截')
-  return { kind: 'text', rel: relPosix, name, size: stat.size, at: stat.mtimeMs, enc, truncated, text }
+  return { kind: 'text', rel: relPosix, name, size: stat.size, at: stat.mtimeMs, enc, truncated, text, absolutePath: real }
 }
 
 /** Parse a single `bytes=a-b` range against `size`; null = whole file, false = unsatisfiable. */

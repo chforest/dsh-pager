@@ -5,9 +5,13 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Chromium WebView needs this normal permission to select its communication audio device. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- Background alerts: task finished / needs approval -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -44,6 +48,10 @@
                 <data android:mimeType="image/*" />
             </intent-filter>
         </activity>
+
+        <service android:name=".VideoDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- Unlock gate for Allow / answer / reply from notifications (see ConfirmActivity). -->
         <activity

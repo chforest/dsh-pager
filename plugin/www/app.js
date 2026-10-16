@@ -64,6 +64,8 @@
 
   // ------------------------------------------------------------ icons
   var P = {
+    mic: '<rect x="8" y="2" width="8" height="13" rx="4"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/>',
+    shield: '<path d="M12 3l8 3v6c0 5-8 9-8 9S4 17 4 12V6l8-3z"/><path d="M9 12l2 2 4-4"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     back: '<path d="M15 18l-6-6 6-6"/>',
@@ -265,13 +267,56 @@
     ws: [], wsById: {}, sessions: [], byId: {}, blanks: {},
     run: new Set(), asks: new Map(), qs: new Map(), chats: new Map(),
     filter: store.get('filter', 'all'), query: '', cur: null, booted: false, hellos: 0,
-    att: [], drafts: store.get('drafts', {}), status: 'connecting', uiUpdate: null,
+    att: [], drafts: store.get('drafts', {}), asyncDrafts: store.get('async-question-drafts', {}), status: 'connecting', uiUpdate: null,
     agents: { mode: 'auto', away: false, sessions: [] },
   }
   var el = {}
   ;['app', 'home', 'chat', 'status', 'chips', 'list', 'rows', 'ptr', 'fab', 'searchBox', 'q', 'cTitle', 'cSub', 'scroller', 'older', 'msgs', 'tail',
-    'toBottom', 'dock', 'input', 'send', 'attach', 'quick', 'file', 'thumbs', 'sheetWrap', 'sheet', 'viewer', 'toast', 'head',
-    'fv', 'fvBody', 'fvTitle', 'fvSub', 'fvAct'].forEach(function (id) { el[id] = document.getElementById(id) })
+    'toBottom', 'dock', 'inputWrap', 'inputSuggestion', 'input', 'send', 'attach', 'quick', 'file', 'thumbs', 'sheetWrap', 'sheet', 'viewer', 'toast', 'head',
+    'fv', 'fvBody', 'fvTitle', 'fvSub', 'fvAct', 'permission', 'mic', 'voiceBar', 'voiceState', 'voiceCaption', 'voiceFinish', 'voiceEnd', 'callPanel', 'callState', 'callClock', 'callCaption', 'callMute', 'callHangup', 'callInterrupt', 'voiceRetryReplies', 'holdTalk', 'voiceKeyboard', 'holdHint'].forEach(function (id) { el[id] = document.getElementById(id) })
+
+  // Context suggestions are separate from the draft until explicitly accepted.
+  var suggestion = { seen: new Set(), key: null, text: '', timer: null, controller: null, generation: 0, composing: false, placeholder: null }
+  function hideSuggestion() {
+    suggestion.generation++; clearTimeout(suggestion.timer); suggestion.timer = null
+    if (suggestion.controller) suggestion.controller.abort(); suggestion.controller = null
+    suggestion.key = null; suggestion.text = ''; el.inputSuggestion.hidden = true; el.inputSuggestion.textContent = ''; el.inputSuggestion.title = ''
+    if (suggestion.placeholder !== null) { el.input.placeholder = suggestion.placeholder; suggestion.placeholder = null }
+  }
+  function suggestionKey() {
+    var sid = S.cur, c = sid && S.chats.get(sid)
+    if (!c || !c.loaded || isAgent(sid) || document.visibilityState !== 'visible' || el.input.value || S.att.length || isRunning(sid) || voice || voiceStarting || holdMode || holdGesture || suggestion.composing || pendingCount(sid) || (c.pending || []).length || c.partial || (c.queue || []).length) return null
+    if ((c.asyncQuestions || []).some(function (q) { return q.status === 'waiting' || q.status === 'deferred' || (q.status === 'answered' && q.delivery !== 'accepted' && q.delivery !== 'not-needed') })) return null
+    var end = -1, answer = null
+    c.items.forEach(function (item, i) { if (item.k === 'end') end = i })
+    if (end < 0 || c.items[end].reason !== 'completed' || c.items.slice(end + 1).some(function (item) { return item.k === 'u' || item.k === 'a' || item.k === 't' })) return null
+    for (var i = end - 1; i >= 0 && c.items[i].k !== 'end' && c.items[i].k !== 'u'; i--) if (c.items[i].k === 'a' && c.items[i].text) { answer = c.items[i]; break }
+    return answer ? sid + ':' + c.items[end].seq + ':' + answer.seq : null
+  }
+  function syncSuggestion() {
+    var key = suggestionKey()
+    if (suggestion.key === key) return
+    hideSuggestion()
+    if (!key || suggestion.seen.has(key)) return
+    suggestion.key = key
+    var generation = suggestion.generation, sid = S.cur
+    suggestion.timer = setTimeout(function () {
+      suggestion.timer = null
+      if (suggestionKey() !== key || generation !== suggestion.generation) return
+      suggestion.seen.add(key)
+      var controller = new AbortController(); suggestion.controller = controller
+      fetch('/m/api/suggestions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: sid }), signal: controller.signal, redirect: 'manual' }).then(handle).then(function (value) {
+        if (generation !== suggestion.generation || suggestionKey() !== key) return
+        suggestion.controller = null
+        if (!value || typeof value.text !== 'string' || !value.text.trim()) return
+        suggestion.text = value.text; suggestion.placeholder = el.input.placeholder; el.input.placeholder = ''; el.inputSuggestion.textContent = value.text; el.inputSuggestion.title = value.text; el.inputSuggestion.hidden = false
+      }).catch(function () {})
+    }, 1000)
+  }
+  function acceptSuggestion() {
+    if (!suggestion.text || suggestion.key !== suggestionKey()) { hideSuggestion(); return false }
+    var text = suggestion.text; hideSuggestion(); el.input.value = text; saveDraft(); autosize(); syncSend(); el.input.focus(); return true
+  }
 
   function chatState(id) {
     return { id: id, items: [], pending: [], partial: null, lastSeq: -1, firstSeq: -1, hasMore: false, loaded: false, loading: false, err: false,
@@ -333,6 +378,7 @@
   }
   function rowHtml(s) {
     var tag = pendingCount(s.id) ? '<span class="tag ask">待确认</span>' : isRunning(s.id) ? '<span class="tag run"><i></i>运行中</span>' : ''
+    if (Number.isFinite(s.aq) && s.aq > 0) tag += '<span class="tag async-pending">待补充 ' + Math.floor(s.aq) + '</span>'
     return '<button class="row" data-open="' + esc(s.id) + '"><div class="mid"><div class="t' + (s.title ? '' : ' none') + '">' + esc(s.title || '未命名对话') +
       '</div><div class="m">' + tag + '<span>' + esc(wsTitle(s.w)) + '</span></div></div><span class="when">' + when(s.at) + '</span></button>'
   }
@@ -459,6 +505,11 @@
     else scheduleBoot() // a new (formerly blank) session just started: it now belongs in the list
     scheduleHome()
     if (id === S.cur) {
+      if (voice && voice.sid === id && voice.waiting) {
+        if (on) voice.responseSeen = true
+        el.voiceFinish.textContent = on ? '打断并说' : '继续说'
+        maybeResumeVoice(voice); syncHoldUi()
+      }
       var c = S.chats.get(id)
       if (c && !on) c.partial = null
       renderHead(); syncSend(); drawDock()
@@ -478,9 +529,16 @@
 
   // ------------------------------------------------------------ navigation
   function show(view) { el.app.classList.toggle('in-chat', view === 'chat') }
+  var attachmentGeneration = 0
+  function pauseChatVoice() { cancelVoicePress(); stopVoiceQueue(); el.msgs.querySelectorAll('audio[data-voice-id]').forEach(function (audio) { audio.pause() }) }
+  function clearAttachments() { attachmentGeneration++; S.att.forEach(function (item) { URL.revokeObjectURL(item.url) }); S.att = [] }
   function openChat(id, fromPop) {
+    hideSuggestion()
     if (isAgent(id) && S.agents.enabled === false) { toast('当前仅同步 DSH 自己的项目'); return }
     if (!id) return
+    var switched = S.cur !== id
+    if (switched) { if (holdGesture) cancelHold(); holdMode = null; syncHoldUi(); pauseChatVoice(); clearAttachments() }
+    if (voice && voice.sid !== id) stopVoice()
     if (S.cur && S.cur !== id) saveDraft()
     S.cur = id
     var c = S.chats.get(id)
@@ -491,17 +549,22 @@
     el.input.value = S.drafts[id] || ''
     el.input.placeholder = ag ? '继续这个会话（电脑在后台运行）' : '发消息给 DSH'
     el.attach.hidden = ag
+    el.mic.hidden = ag || Boolean(voice)
     autosize()
-    S.att = []
     drawThumbs()
     renderHead()
     renderMsgs(c, true)
     drawDock()
     syncSend()
     if (!c.loaded && !c.loading) loadHistory(c)
-    if (!ag) loadModel(c)
+    if (!ag) { loadAsyncQuestions(id); loadVoiceHistory(id); loadModel(c); loadPermissions(c).catch(function () {}) }
+    syncHoldUi()
   }
   function closeChat() {
+    hideSuggestion()
+    if (holdGesture) cancelHold(); holdMode = null; syncHoldUi()
+    pauseChatVoice(); clearAttachments()
+    stopVoice()
     saveDraft()
     if (S.cur && !S.byId[S.cur]) scheduleBoot()
     S.cur = null
@@ -545,11 +608,14 @@
   })
 
   function openSheet(html) {
+    voiceContextKey = null
+    stopVoicePreview()
     el.sheet.onclick = null
     el.sheet.innerHTML = html
     el.sheetWrap.hidden = false
     requestAnimationFrame(function () { requestAnimationFrame(function () { el.sheetWrap.classList.add('on') }) })
     pushOverlay('sheet', function () {
+      stopVoicePreview(); speakerView++
       el.sheetWrap.classList.remove('on')
       setTimeout(function () { if (!hasOverlay('sheet')) { el.sheetWrap.hidden = true; el.sheet.innerHTML = '' } }, 340)
     })
@@ -570,8 +636,52 @@
   function rawUrl(s, rel) { return '/m/api/raw?s=' + enc(s) + '&path=' + enc(rel) }
   var fullVideo = null, nativeVideo = null
   function videoHtml(s, p, cls, messageSeq) {
-    return '<div class="video-box" data-video-box><video class="' + cls + '" aria-label="播放 ' + esc(baseName(p)) + '" data-artifact="' + esc(p) + '" data-session="' + esc(s) + '"' + (messageSeq == null ? '' : ' data-message-seq="' + esc(messageSeq) + '"') + ' data-quality="preview" controls playsinline preload="none" src="' + esc(rawUrl(s, p)) + '"></video>' +
-      '<div class="video-options"><span class="video-note">流畅预览</span><button data-video-retry hidden>重试预览</button><button data-video-quality>切换原画</button><button data-video-fullscreen>全屏</button></div></div>'
+    var nativeActions = /DSHApp\//.test(navigator.userAgent) && APP_CODE >= 14
+    return '<div class="video-box" data-video-box><video class="' + cls + '" aria-label="播放 ' + esc(baseName(p)) + '" data-artifact="' + esc(p) + '" data-session="' + esc(s) + '"' + (messageSeq == null ? '' : ' data-message-seq="' + esc(messageSeq) + '"') + ' data-quality="preview" controls' + (nativeActions ? '' : ' controlslist="nodownload nofullscreen"') + ' playsinline preload="none" src="' + esc(rawUrl(s, p)) + '"></video>' +
+      '<div class="video-options"><span class="video-note">流畅预览</span><button data-video-retry hidden>重试预览</button><button data-video-quality>切换原画</button>' + (nativeActions ? '' : '<button data-video-fullscreen>全屏</button><button data-video-download>下载原视频</button>') + '</div><p class="video-download-state" role="status" hidden></p></div>'
+  }
+  var videoDownloads = new Map()
+  function paintVideoDownload(job) {
+    var button = job.button, box = button.closest('[data-video-box]'), note = box && box.querySelector('.video-download-state')
+    button.disabled = job.status === 'checking' || job.status === 'requesting' || job.status === 'queued'
+    button.textContent = job.status === 'checking' ? '检查原视频…' : job.status === 'queued' ? '下载已排队' : job.status === 'error' ? '重试下载原视频' : '下载原视频'
+    if (note) { note.hidden = false; note.textContent = job.message }
+  }
+  function downloadVideo(button) {
+    var box = button.closest('[data-video-box]'), video = box && box.querySelector('video')
+    if (!video) return
+    if (/DSHApp\//.test(navigator.userAgent) && APP_CODE < 14) {
+      openSheet('<div class="sh-h">需要更新 App</div><div class="sh-b"><p>请升级到 DSH 1.5.3，再保存原视频到手机。</p><button class="btn pri" data-download-update>检查并更新 App</button></div>')
+      el.sheet.onclick = function (event) { if (event.target.closest('[data-download-update]')) location.href = 'dshapp://update' }; return
+    }
+    var key = video.dataset.session + '\n' + video.dataset.artifact, existing = videoDownloads.get(key)
+    if (existing && ['checking', 'requesting', 'queued'].indexOf(existing.status) >= 0) { existing.button = button; paintVideoDownload(existing); return }
+    var original = rawUrl(video.dataset.session, video.dataset.artifact) + '&download=1', origin = String(location.href).match(/^https?:\/\/[^/]+/), controller = new AbortController()
+    var job = { id: uuid(), key: key, button: button, status: 'checking', message: '正在检查原视频是否可下载…', controller: controller }
+    videoDownloads.set(key, job); paintVideoDownload(job)
+    job.timer = setTimeout(function () { controller.abort() }, 15000)
+    fetch(original, { method: 'HEAD', cache: 'no-store', redirect: 'error', signal: controller.signal }).then(function (response) {
+      if (!response.ok) throw new Error('无法读取原视频（' + response.status + '）')
+      clearTimeout(job.timer)
+      if (/DSHApp\//.test(navigator.userAgent)) {
+        if (!origin) throw new Error('无法确定下载服务器')
+        job.status = 'requesting'; job.message = '正在交给手机保存原视频…'; paintVideoDownload(job)
+        job.timer = setTimeout(function () { if (job.status === 'requesting') { job.status = 'error'; job.message = '尚未收到下载确认，请先查看手机通知，避免重复下载'; paintVideoDownload(job) } }, 20000)
+        location.href = 'dshapp://download?url=' + enc(origin[0] + original) + '&name=' + enc(baseName(video.dataset.artifact)) + '&requestId=' + enc(job.id)
+      } else {
+        var link = document.createElement('a'); link.href = original; link.download = baseName(video.dataset.artifact); document.body.appendChild(link); link.click(); link.remove()
+        job.status = 'requested'; job.message = '已请求浏览器下载原视频，请查看浏览器下载列表'; paintVideoDownload(job)
+      }
+    }).catch(function (error) { clearTimeout(job.timer); job.status = 'error'; job.message = error.name === 'AbortError' ? '原视频检查超时，请检查连接后重试' : error.message; paintVideoDownload(job); toast(job.message, 'err') })
+  }
+  window.dshDownloadResult = function (result) {
+    if (!result || ['queued', 'complete', 'error'].indexOf(result.status) < 0) return
+    var job = Array.from(videoDownloads.values()).find(function (item) { return item.id === result.requestId })
+    if (!job) { if (/DSHApp\//.test(navigator.userAgent) && APP_CODE >= 14) toast(result.message || (result.status === 'queued' ? '已加入下载队列，尚未完成' : result.status === 'complete' ? '原视频已保存到手机系统下载目录' : '下载失败，请查看手机下载通知'), result.status === 'error' ? 'err' : undefined); return }
+    if (job.status === 'complete') return
+    clearTimeout(job.timer); job.status = result.status
+    job.message = result.message || (result.status === 'queued' ? '已加入下载队列，尚未完成，可在手机通知中查看' : result.status === 'complete' ? '原视频已保存到手机系统下载目录' : '下载失败，请查看手机下载通知后重试')
+    paintVideoDownload(job)
   }
   function closeFullscreenVideo() { if (fullVideo && !fullVideo.closing) { fullVideo.closing = true; closeOverlay() } }
   function fullscreenVideo(button) {
@@ -616,7 +726,7 @@
     if (document.fullscreenElement === fullVideo.box) fullVideo.native = true
     else if (fullVideo.native) closeFullscreenVideo()
   })
-  window.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeFullscreenVideo() })
+  window.addEventListener('keydown', function (e) { if (e.key === 'Escape') { if (suggestion.key) suggestion.seen.add(suggestion.key); hideSuggestion(); closeFullscreenVideo() } })
   function videoNote(v, text) { var n = v.closest('[data-video-box]').querySelector('.video-note'); if (n) n.textContent = text }
   function videoState(v) {
     var box = v.closest('[data-video-box]'), original = v.dataset.quality === 'original'
@@ -669,6 +779,8 @@
   function wireVideos(container) {
     container.querySelectorAll('video[data-artifact]').forEach(function (v) {
       videoState(v)
+      var download = videoDownloads.get(v.dataset.session + '\n' + v.dataset.artifact), downloadButton = v.closest('[data-video-box]').querySelector('[data-video-download]')
+      if (download && downloadButton) { download.button = downloadButton; paintVideoDownload(download) }
       v.onerror = function () {
         v._generation = (v._generation || 0) + 1; v._preparing = false
         v._previewError = v.dataset.quality !== 'original'; v.dataset.previewReady = ''; videoState(v)
@@ -843,6 +955,8 @@
     if (c.id === S.cur) renderMsgs(c)
     return get((isAgent(c.id) ? '/m/api/agents/history?s=' : '/m/api/history?s=') + enc(c.id) + '&n=40').then(function (v) {
       c.items = v.items
+      var delivered = new Set(c.items.filter(function (item) { return item.k === 'u' && item.rid }).map(function (item) { return item.rid }))
+      c.pending = c.pending.filter(function (item) { return !item.rid || !delivered.has(item.rid) })
       c.partial = v.partial
       c.lastSeq = v.lastSeq
       c.firstSeq = v.firstSeq
@@ -873,12 +987,13 @@
     renderMsgs(c, false, true)
     get('/m/api/history?s=' + enc(c.id) + '&n=40&before=' + c.firstSeq).then(function (v) {
       var h0 = el.scroller.scrollHeight, t0 = el.scroller.scrollTop
-      c.items = v.items.concat(c.items)
+      var seen = new Set(c.items.map(function (item) { return item.seq }).filter(Number.isFinite))
+      c.items = v.items.filter(function (item) { if (!Number.isFinite(item.seq)) return true; if (seen.has(item.seq)) return false; seen.add(item.seq); return true }).concat(c.items)
       if (v.firstSeq >= 0) c.firstSeq = v.firstSeq
       c.hasMore = v.hasMore
       c.olderLoading = false
       renderMsgs(c, false, true)
-      el.scroller.scrollTop = t0 + (el.scroller.scrollHeight - h0)
+      if (S.cur === c.id) el.scroller.scrollTop = t0 + (el.scroller.scrollHeight - h0)
     }, function (e) {
       c.olderLoading = false
       renderMsgs(c, false, true)
@@ -910,10 +1025,660 @@
   }
   var EFF = { off: '不思考', low: '低', medium: '中', high: '高', max: '最大' }
 
+  // Voice is always tied to the current session and an explicit tap. Android
+  // asks for RECORD_AUDIO only then; backgrounding or leaving releases it.
+  var holdMode = null, holdGesture = null
+  var voice = null, voiceStarting = false, voiceCleanup = Promise.resolve(), pendingVoiceReplies = new Map()
+  function syncHoldUi() {
+    syncSuggestion()
+    if (!el.holdTalk) return
+    var enabled = !!holdMode, held = !!holdGesture
+    el.holdTalk.hidden = !enabled; el.voiceKeyboard.hidden = !enabled; el.holdHint.hidden = !enabled
+    el.input.hidden = enabled; el.inputWrap.hidden = enabled; el.send.hidden = enabled; el.mic.hidden = enabled || !!voice || Boolean(S.cur && isAgent(S.cur))
+    var busy = voice && (voice.finishing || voice.failedSave || (voice.waiting && (!voice.turnDone || isRunning(voice.sid) || voice.playing || voice.audioPending || voice.ttsBusy)))
+    el.holdTalk.disabled = !held && (!!busy || voiceStarting)
+    el.holdTalk.classList.toggle('holding', held); el.holdTalk.classList.toggle('cancel', held && holdGesture.cancelled)
+    el.holdTalk.textContent = held ? (holdGesture.cancelled ? '松开取消' : voice && voice.ready ? (holdMode === 'draft' ? '松开转文字' : '松开发送') : '正在开启麦克风…') : busy ? 'DSH 正在回复…' : '按住说话'
+    el.holdHint.textContent = held ? '向上滑动取消' : holdMode === 'draft' ? '松开后转成文字，确认后再发送' : '松开发送语音，上滑取消'
+    if (voice && voice.held) { el.voiceBar.hidden = !voice.failedSave; if (voice.failedSave) el.voiceEnd.hidden = false }
+  }
+  function chooseHoldMode(mode) { holdMode = mode === 'chat' ? mode : null; syncHoldUi() }
+  function restoreHoldDraft(gesture) {
+    if (gesture.mode !== 'draft') return
+    if (gesture.base) S.drafts[gesture.sid] = gesture.base; else delete S.drafts[gesture.sid]
+    store.set('drafts', S.drafts)
+    if (S.cur === gesture.sid) { el.input.value = gesture.base; autosize(); syncSend() }
+  }
+  function cancelHold(message, notifyHost) {
+    var gesture = holdGesture; if (!gesture) return
+    holdGesture = null
+    if (voice && voice === gesture.voice) { voice.draftFinalized = true; stopVoice(undefined, notifyHost) }
+    restoreHoldDraft(gesture); syncHoldUi(); if (message) toast(message)
+  }
+  function beginHold(event) {
+    if (!holdMode || holdGesture || (event.button != null && event.button !== 0)) return
+    if (event.preventDefault) event.preventDefault()
+    if (voiceStarting || (voice && (voice.finishing || voice.failedSave || (voice.waiting && !voice.turnDone) || isRunning(voice.sid) || voice.playing || voice.audioPending))) return
+    if (voice) stopVoice()
+    var gesture = { pointerId: event.pointerId, startY: event.clientY || 0, sid: S.cur, base: el.input.value, mode: holdMode, cancelled: false }
+    holdGesture = gesture; startVoice(holdMode)
+    if (!voice) { holdGesture = null; syncHoldUi(); return }
+    gesture.voice = voice; voice.held = true; holdGesture = gesture
+    try { if (event.pointerId != null && el.holdTalk.setPointerCapture) el.holdTalk.setPointerCapture(event.pointerId) } catch (e) {}
+    syncHoldUi()
+  }
+  function releaseHold(cancelled, automatic) {
+    var gesture = holdGesture; if (!gesture) return
+    if (cancelled || gesture.cancelled || !voice || voice !== gesture.voice || !voice.ready || voice.total < 0.5) { cancelHold(cancelled || gesture.cancelled ? '本次录音已取消' : '录音太短，请按住说话后再松开'); return }
+    holdGesture = null
+    if (gesture.mode === 'draft') holdMode = null
+    releaseVoiceCapture(voice); finishVoice(); syncHoldUi()
+  }
+  function leaveHoldMode() {
+    if (holdGesture) cancelHold('本次录音已取消')
+    holdMode = null
+    // Submitted messages continue receiving their reply; unsent capture exits.
+    if (voice && !voice.finishing) { voice.draftFinalized = true; stopVoice() } else if (voice) voice.exitToKeyboard = true
+    syncHoldUi(); el.input.focus()
+  }
+  function voiceFetch(route, options) {
+    var controller = new AbortController(), timer = setTimeout(function () { controller.abort() }, 90000)
+    options.signal = controller.signal
+    return fetch(route, options).then(function (response) {
+      return response.json().then(function (value) { if (!response.ok) throw new Error(value.error || '语音服务暂不可用'); return value })
+    }).then(function (value) { clearTimeout(timer); return value }, function (error) { clearTimeout(timer); throw error })
+  }
+  function voiceJson(route, body) {
+    return voiceFetch(route, { method: body ? 'POST' : 'GET', headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined })
+  }
+  function voiceWav(parts) {
+    var count = parts.reduce(function (n, p) { return n + p.length }, 0), bytes = new Uint8Array(44 + count * 2), view = new DataView(bytes.buffer)
+    function word(at, text) { for (var i = 0; i < text.length; i++) bytes[at + i] = text.charCodeAt(i) }
+    word(0, 'RIFF'); view.setUint32(4, 36 + count * 2, true); word(8, 'WAVEfmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, 16000, true); view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); word(36, 'data'); view.setUint32(40, count * 2, true)
+    var at = 44; parts.forEach(function (p) { for (var i = 0; i < p.length; i++) { var f = Math.max(-1, Math.min(1, p[i])); view.setInt16(at, f < 0 ? f * 32768 : f * 32767, true); at += 2 } })
+    var raw = ''; for (var j = 0; j < bytes.length; j += 8192) raw += String.fromCharCode.apply(null, bytes.subarray(j, j + 8192))
+    return btoa(raw)
+  }
+  function mergeConfirmedVoice(sid, item) {
+    var c = S.chats.get(sid)
+    if (!c || !item || !item.id || !item.role) return false
+    var previous = (c.voiceItems || []).find(function (entry) { return entry.id === item.id })
+    if (previous && JSON.stringify(previous) === JSON.stringify(item)) return true
+    c.voiceRevision = (c.voiceRevision || 0) + 1
+    c.voiceItems = (c.voiceItems || []).filter(function (entry) { return entry.id !== item.id }).concat(item).sort(function (a, b) { return String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.id).localeCompare(String(b.id)) })
+    c.voiceSignature = JSON.stringify(c.voiceItems)
+    if (S.cur === sid) renderMsgs(c, false, true)
+    return true
+  }
+  function storeVoice(sid, item) {
+    return voiceJson('/m/api/voice', Object.assign({ s: sid }, item)).then(function (out) {
+      if (!out.ok) throw new Error(out.error || '语音保存失败')
+      var c = S.chats.get(sid), saved = out.value
+      if (item.mode === 'message' && mergeConfirmedVoice(sid, saved)) Promise.resolve(c && c.voiceLoading).then(function () { loadVoiceHistory(sid) })
+      else loadVoiceHistory(sid)
+      return saved
+    })
+  }
+  function loadVoiceHistory(sid) {
+    if (!sid || isAgent(sid)) return
+    var owner = S.chats.get(sid), revision = owner && (owner.voiceRevision || 0)
+    if (owner && owner.voiceLoading) return owner.voiceLoading
+    var request = voiceJson('/m/api/voice?s=' + enc(sid)).then(function (out) {
+      var c = S.chats.get(sid)
+      if (!c || !out.ok || (c.voiceRevision || 0) !== revision) return
+      var items = out.value.items || [], signature = JSON.stringify(items)
+      if (c.voiceSignature === signature) return
+      c.voiceSignature = signature; c.voiceItems = items
+      if (sid === S.cur) renderMsgs(c, false, true)
+    }).catch(function () {})
+    if (owner) { owner.voiceLoading = request; request.then(function () { if (owner.voiceLoading === request) owner.voiceLoading = null }) }
+    return request
+  }
+  function voiceMenuKey(item) { return item.role === 'assistant' && item.replyTo ? 'reply:' + item.replyTo : item.id }
+  function voiceBubbleHtml(c, item, text, status) {
+    var segments = item.segmentIds || [], revision = segments.join(','), grouped = segments.length > 0
+    var url = item.url && item.url.indexOf('/m/api/voice/audio?') === 0 ? item.url : '/m/api/voice/audio?s=' + enc(c.id) + '&id=' + enc(item.id) + (grouped ? '&group=1' : '')
+    return '<div class="voice-bubble"' + (item.callId ? ' data-call-id="' + esc(item.callId) + '"' : '') + '><audio hidden preload="none" data-voice-id="' + esc(item.id) + '" data-voice-revision="' + esc(revision) + '" data-session="' + esc(c.id) + '" src="' + esc(url) + '"></audio><button class="voice-play" data-voice-play="' + esc(item.id) + '" data-voice-menu="' + esc(voiceMenuKey(item)) + '" aria-label="播放语音" aria-pressed="false"><span class="voice-play-state" aria-hidden="true">▷</span><span class="voice-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><span>' + (item.durationMs ? Math.max(1, Math.round(item.durationMs / 1000)) + '″' : '语音') + '</span></button>' + (status ? '<small class="voice-delivery">' + esc(status) + '</small>' : '') + (text ? voiceTextHtml(c, item, '<div class="voice-transcript">' + esc(text) + '</div>') : '') + '</div>'
+  }
+  function voiceTextHtml(c, item, body) { var key = voiceMenuKey(item); return '<div class="voice-text" data-voice-transcript="' + esc(key) + '"' + (c.voiceTextOpen && c.voiceTextOpen.has(key) ? '' : ' hidden') + '>' + body + '</div>' }
+  function pendingVoiceHtml(c, owner) {
+    c.voicePendingReply = true
+    return '<div class="voice-bubble voice-pending"><button class="voice-play" data-voice-menu="reply:' + esc(owner.id) + '" aria-label="正在生成语音，长按可查看文字"><span class="spin s"></span><span>正在生成语音…</span></button></div>'
+  }
+  var voiceQueue = null, voicePress = null, voiceContextKey = null, voiceClickSuppressed = new Map()
+  function stopVoiceQueue() { voiceQueue = null }
+  function advanceVoiceQueue(ended) {
+    var queue = voiceQueue
+    if (!queue || queue.sid !== S.cur || queue.items[queue.index] !== ended) return
+    queue.index++
+    if (queue.index >= queue.items.length) { stopVoiceQueue(); return }
+    var next = queue.items[queue.index]
+    if (next.isConnected === false) { stopVoiceQueue(); return }
+    next.play().catch(function () { if (voiceQueue === queue) { stopVoiceQueue(); toast('连续播放已停止，这条语音暂时无法播放') } })
+  }
+  function cancelVoicePress() { if (voicePress) clearTimeout(voicePress.timer); voicePress = null }
+  function openVoiceMessageMenu(button) {
+    var c = S.chats.get(S.cur), key = button.dataset.voiceMenu, sid = S.cur
+    if (!c || !key) return
+    if (voiceContextKey === key && hasOverlay('sheet')) return
+    cancelVoicePress(); voiceClickSuppressed.set(key, Date.now() + 1000)
+    var audio = button.closest('.voice-bubble')?.querySelector('audio[data-voice-id]'), expanded = c.voiceTextOpen && c.voiceTextOpen.has(key)
+    var textExists = Array.from(el.msgs.querySelectorAll('[data-voice-transcript]')).some(function (node) { return node.dataset.voiceTranscript === key })
+    openSheet('<div class="sh-h">语音消息</div><div class="sh-b">' + (textExists ? '<button class="opt-row" data-voice-action="text">' + (expanded ? '隐藏文字' : '转文字') + '</button>' : '') + (audio ? '<button class="opt-row" data-voice-action="play">' + (!audio.paused && !audio.ended ? '暂停' : '播放') + '</button><button class="opt-row" data-voice-action="queue">' + (voiceQueue ? '停止连续播放' : '连续播放') + '</button>' : '<p class="voice-pending-hint">语音生成中，文字可先查看。</p>') + '<button class="opt-row" data-voice-action="device">播放设备</button></div>')
+    voiceContextKey = key
+    el.sheet.onclick = function (event) {
+      var action = event.target.closest('[data-voice-action]'); if (!action || S.cur !== sid) return
+      var kind = action.dataset.voiceAction
+      if (kind === 'device') { toast('使用当前系统扬声器或耳机输出，可在手机系统中调整'); return }
+      if (kind === 'text') {
+        if (!c.voiceTextOpen) c.voiceTextOpen = new Set()
+        if (c.voiceTextOpen.has(key)) c.voiceTextOpen.delete(key); else c.voiceTextOpen.add(key)
+        el.msgs.querySelectorAll('[data-voice-transcript]').forEach(function (node) { if (node.dataset.voiceTranscript === key) node.hidden = !c.voiceTextOpen.has(key) })
+      } else if (kind === 'play' && audio) playVoiceBubble(button)
+      else if (kind === 'queue' && audio) {
+        if (voiceQueue) pauseChatVoice()
+        else {
+          var items = Array.from(el.msgs.querySelectorAll('audio[data-voice-id]')).filter(function (item) { return item.dataset.session === sid && !item.closest('.voice-orphan') }), index = items.indexOf(audio)
+          if (index >= 0 && prepareHistoryVoice()) { pauseChatVoice(); voiceQueue = { sid: sid, items: items.slice(index), index: 0 }; audio.play().catch(function () { stopVoiceQueue(); toast('连续播放未开始，这条语音暂时无法播放') }) }
+        }
+      }
+      closeOverlay()
+    }
+  }
+  function paintVoicePlayback(audio) {
+    var box = audio.closest && audio.closest('.voice-bubble'), button = box && box.querySelector('[data-voice-play]')
+    if (!button) return
+    var playing = !audio.paused && !audio.ended
+    button.setAttribute('aria-pressed', String(playing)); button.setAttribute('aria-label', playing ? '暂停语音' : '播放语音'); button.classList.toggle('playing', playing)
+    var icon = button.querySelector('.voice-play-state'); if (icon) icon.textContent = playing ? 'Ⅱ' : '▷'
+  }
+  function prepareHistoryVoice() {
+    if (voice && voice.mode === 'call') { toast('通话中暂不播放历史语音，请先挂断'); return false }
+    if (holdGesture) { toast('请先结束当前录音'); return false }
+    if (voice && voice.conversation && voice.waiting) stopVoice('已切换到语音回放')
+    stopVoicePreview(); return true
+  }
+  function playVoiceBubble(button) {
+    if (!prepareHistoryVoice()) return
+    stopVoiceQueue()
+    var box = button.closest('.voice-bubble'), audio = box && box.querySelector('audio[data-voice-id]')
+    if (!audio) return
+    if (!audio.paused && !audio.ended) { audio.pause(); paintVoicePlayback(audio); return }
+    stopVoicePreview()
+    if (voice && voice.playing) stopVoice('已切换到语音回放')
+    el.msgs.querySelectorAll('audio[data-voice-id]').forEach(function (other) { if (other !== audio) other.pause() })
+    audio.play().then(function () { paintVoicePlayback(audio) }, function () { toast('语音暂时无法播放，请检查连接后重试'); paintVoicePlayback(audio) })
+  }
+
+  function syncReplyRetry() {
+    var failed = Array.from(pendingVoiceReplies.values()).filter(function (entry) { return entry.failed })
+    el.voiceRetryReplies.hidden = !failed.length
+    el.voiceRetryReplies.textContent = '重试保存回复 · ' + failed.length
+  }
+  function persistVoiceReply(entry) {
+    if (entry.saving) return entry.saving
+    entry.failed = false; syncReplyRetry()
+    entry.saving = storeVoice(entry.sid, entry.body).then(function () {
+      pendingVoiceReplies.delete(entry.body.id); syncReplyRetry()
+    }, function (error) { entry.failed = true; entry.saving = null; syncReplyRetry(); throw error })
+    return entry.saving
+  }
+  function replyDuration(audio, mime) {
+    if (mime !== 'audio/wav') return 0
+    try { var raw = atob(audio), bytes = new Uint8Array(raw.length); for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i); var view = new DataView(bytes.buffer); return raw.slice(0, 4) === 'RIFF' && raw.length >= 44 && view.getUint32(28, true) ? Math.round((raw.length - 44) / view.getUint32(28, true) * 1000) : 0 } catch (e) { return 0 }
+  }
+  function saveVoiceReplies(v, keyOnly) {
+    var writes = []
+    Object.keys(v.replyAudio || {}).forEach(function (key) {
+      var item = v.replyAudio[key]
+      if (keyOnly != null && String(keyOnly) !== key) return
+      if (item.queued) return
+      item.queued = true
+      // The host emits one complete encoded file per data frame, then text.
+      // Keep the exact WAV/MP3 bytes; no AudioContext or lossy re-encoding is
+      // needed to save it. Future multiple complete chunks get separate rows.
+      item.parts.forEach(function (part, index) {
+        var body = { id: index === 0 ? item.id : uuid(), role: 'assistant', text: v.captions[key] || '', mime: part.mime, audio: part.audio, durationMs: part.durationMs || replyDuration(part.audio, part.mime), requestId: item.requestId, replyTo: item.replyTo, mode: v.mode === 'call' ? 'call' : 'message' }
+        if (v.callId) { body.callId = v.callId; body.callStartedAt = v.callStartedAt }
+        var entry = { sid: v.sid, body: body, failed: false, saving: null }
+        pendingVoiceReplies.set(body.id, entry); writes.push(persistVoiceReply(entry))
+      })
+    })
+    return Promise.all(writes)
+  }
+  // Native AEC removes our speaker reference. A rolling pre-roll survives the
+  // asynchronous VAD/cancel handshake, so interruption does not eat first words.
+  function detectBarge(v, pcm, rms) {
+    v.barge.push(pcm); v.bargeCount += pcm.length
+    while (!v.interrupting && v.bargeCount > 24000 && v.barge.length > 1) v.bargeCount -= v.barge.shift().length
+    if (v.interrupting || v.detectBusy || v.muted || v.autoBarge === false) return
+    // A raised, persistent residual floor during speaker output is usually echo.
+    if (!v.echoFloor) v.echoFloor = 0.006
+    if (rms < v.echoFloor * 2) v.echoFloor = v.echoFloor * 0.95 + rms * 0.05
+    if (rms < Math.max(0.018, v.echoFloor * 2.8)) { v.detectPositive = 0; return }
+    var generation = v.playGeneration, detectGeneration = v.detectGeneration || 0, samples = new Float32Array(v.bargeCount), at = 0
+    v.barge.forEach(function (p) { samples.set(p, at); at += p.length })
+    v.detectBusy = true
+    voiceFetch('/voice-mode/asr?sessionId=' + enc(v.sid) + '&epoch=' + v.epoch + '&offset=0&manual=1&vadOnly=1', { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: samples.buffer }).then(function (out) {
+      if (voice !== v || v.muted || detectGeneration !== (v.detectGeneration || 0) || generation !== v.playGeneration || !v.waiting) return
+      v.detectPositive = out.isSpeech === true ? v.detectPositive + 1 : 0
+      if (v.detectPositive < 3) return
+      v.interrupting = true
+      if (v.player) { try { v.player.stop() } catch (e) {} }
+      // Keep all frames arriving until cancellation completes, including pre-roll.
+      var prefix = v.barge
+      continueVoice(v, false, prefix)
+    }).catch(function () { if (voice === v) stopVoice('通话连接中断，已停止录音') }).then(function () { v.detectBusy = false })
+  }
+  function voiceHint(v, text) {
+    if (voice !== v) return
+    if (v.held) {
+      if (text.indexOf('说完发送') >= 0) text = '录音中 · 松开发送，上滑取消'
+      else if (text.indexOf('继续说') >= 0) text = '按住说话发送下一条语音'
+    }
+    el.voiceState.textContent = text; el.callState.textContent = text; syncHoldUi()
+  }
+  function voiceDraft(v, text, final) {
+    if (voice !== v || !text) return
+    if (v.conversation) { if (S.cur === v.sid) { el.voiceCaption.textContent = '我：' + text; el.callCaption.textContent = '我：' + text } return }
+    // A pending final response belongs to the originating draft even after
+    // navigation. Never write it into the newly selected conversation.
+    var current = S.cur === v.sid, draft = current ? el.input.value : (S.drafts[v.sid] || '')
+    if (draft !== v.preview) v.edited = true
+    if (v.edited && !final) return
+    var base = v.edited ? draft : v.base
+    if (v.edited && v.renderedTranscript && text.indexOf(v.renderedTranscript) === 0) text = text.slice(v.renderedTranscript.length).replace(/^\s+/, '')
+    if (v.edited && !text) return
+    var value = (base ? base.replace(/\s+$/, '') + '\n' : '') + text
+    if (!v.edited) v.renderedTranscript = text
+    v.preview = value; S.drafts[v.sid] = value; store.set('drafts', S.drafts)
+    if (current) { el.input.value = value; autosize(); syncSend() }
+  }
+  function releaseVoiceCapture(v) {
+    if (voice === v) el.mic.classList.remove('recording')
+    if (v.processor) { v.processor.onaudioprocess = null; v.processor.disconnect(); v.processor = null }
+    if (v.source) { v.source.disconnect(); v.source = null }
+    if (v.stream) { v.stream.getTracks().forEach(function (t) { t.stop() }); v.stream = null }
+  }
+  function finishDictation(v) {
+    if (v.finishPromise) return v.finishPromise
+    v.finishing = true; el.voiceFinish.disabled = true; voiceHint(v, '正在保留最后一句…')
+    releaseVoiceCapture(v)
+    // Drain queued partial ASR before sending the buffered tail exactly once.
+    v.finishPromise = flushVoice(v, true).then(function (out) {
+      if (voice !== v) return
+      v.draftFinalized = true
+      stopVoice(out && out.text ? '录音已结束，文字已保留，确认后发送' : '录音已结束，已保留识别到的文字')
+    }).catch(function () { if (voice === v) { v.draftFinalized = true; stopVoice('录音已结束，末尾识别未完成；已保留现有文字，请检查') } })
+    return v.finishPromise
+  }
+  function stopVoice(message, notifyHost) {
+    var v = voice
+    if (!v) return
+    if (holdGesture && holdGesture.voice === v) { cancelHold(message || '本次录音已取消', notifyHost); return }
+    if (v.mode === 'draft' && v.ready && !v.draftFinalized && notifyHost !== false) return finishDictation(v)
+    voice = null
+    clearTimeout(v.idle); clearTimeout(v.segmentTimer); clearTimeout(v.resumeTimer)
+    clearTimeout(v.modeTimer); clearInterval(v.clockTimer); el.callPanel.hidden = true
+    if (v.rejectMode) { v.rejectMode(new Error('语音已退出')); v.rejectMode = null }
+    if (v.sse) v.sse.close()
+    releaseVoiceCapture(v)
+    if (v.player) { try { v.player.stop() } catch (e) {} }
+    var savedReplies = saveVoiceReplies(v).catch(function () { toast('回复音频未保存，请勿关闭页面') })
+    if (v.mode === 'call' && v.activated) {
+      var chat = S.chats.get(v.sid)
+      if (chat && !chat.loading) loadHistory(chat)
+      savedReplies.then(function () { return loadVoiceHistory(v.sid) }).then(function () { if (S.cur === v.sid) toBottom() })
+      if (!v.waiting && v.hadSpeech) toast('本段尚未发送的录音已取消')
+    }
+    if (v.ctx) v.ctx.close().catch(function () {})
+    el.mic.classList.remove('recording'); el.mic.setAttribute('aria-label', '语音'); el.mic.hidden = Boolean(S.cur && isAgent(S.cur)); el.voiceBar.hidden = true; syncSend(); syncHoldUi()
+    if (v.activated && notifyHost !== false) voiceCleanup = voiceJson('/voice-mode/toggle', { sessionId: v.sid, on: false, tabId: v.tab }).catch(function () {})
+    if (message) toast(message)
+  }
+  function voiceIdle(v) {
+    clearTimeout(v.idle)
+    v.idle = setTimeout(function () { if (voice === v) stopVoice('语音已因长时间无操作退出') }, 300000)
+  }
+  function callStage(v, name) { if (v.mode === 'call') { if (!v.callTiming) v.callTiming = { epoch: v.epoch }; v.callTiming[name] = Date.now() } }
+  function queueVoicePcm(v, samples, final) {
+    if (final) callStage(v, 'finalQueuedAt')
+    var epoch = v.epoch, offset = v.sent
+    v.sent += samples.length
+    v.chain = v.chain.then(function () {
+      if (voice !== v || epoch !== v.epoch) return null
+      if (final) callStage(v, 'finalStartedAt')
+      var url = '/voice-mode/asr?sessionId=' + enc(v.sid) + '&epoch=' + epoch + '&offset=' + offset + '&manual=1' + (final ? '&final=1' : '')
+      return voiceFetch(url, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: samples.buffer }).then(function (out) {
+          if (final && epoch === v.epoch) callStage(v, 'finalReadyAt')
+          if (out.loading) throw new Error('识别模型还在准备，请稍后重试')
+          if (voice === v && (S.cur === v.sid || v.mode === 'draft') && epoch === v.epoch) { v.text = out.text || ''; voiceDraft(v, v.text, final) }
+          return out
+      })
+    })
+    return v.chain
+  }
+  function flushVoice(v, final) {
+    var samples = new Float32Array(v.count), at = 0
+    v.parts.forEach(function (p) { samples.set(p, at); at += p.length })
+    v.parts = []; v.count = 0
+    var epoch = v.epoch, callPartial = v.mode === 'call' && !final
+    if (callPartial) v.callPartialPending = true
+    var request = queueVoicePcm(v, samples, final)
+    if (!callPartial) return request
+    return request.then(function (out) { if (v.epoch === epoch) v.callPartialPending = false; return out }, function (error) { if (v.epoch === epoch) v.callPartialPending = false; throw error })
+  }
+  // Both host synthesis and local playback must drain. A quiet gap between
+  // two synthesized sentences is not permission to reopen the microphone.
+  function maybeResumeVoice(v) {
+    clearTimeout(v.resumeTimer)
+    if (voice !== v || v.mode !== 'call' || !v.waiting || !v.responseSeen || !v.turnDone || v.ttsBusy || v.audioPending || v.playing || v.finishing || isRunning(v.sid)) return
+    v.resumeTimer = setTimeout(function () {
+      if (voice !== v || !v.waiting || !v.turnDone || v.ttsBusy || v.audioPending || v.playing || v.finishing || isRunning(v.sid)) return
+      if (el.input.value.trim() || S.att.length) { stopVoice('通话已暂停，请先处理草稿'); return }
+      continueVoice(v, true)
+    }, v.autoBarge ? 250 : 600)
+  }
+  function finishVoice() {
+    var v = voice
+    if (!v || !v.ready || v.finishing) return
+    if (v.mode === 'draft') return finishDictation(v)
+    if (v.waiting) { continueVoice(v); return }
+    if (v.failedSave && v.pendingVoice) { v.finishing = true; el.voiceFinish.disabled = true; submitVoiceMessage(v); return }
+    callStage(v, 'endpointAt')
+    v.finishing = true; el.voiceFinish.disabled = true; voiceHint(v, v.conversation ? '正在发送语音…' : '正在转成文字…')
+    flushVoice(v, true).then(function (out) {
+      if (voice !== v) return
+      var text = out && out.text && out.text.trim()
+      if (!text) { stopVoice('没有识别到清晰语音，请重试'); return }
+      if (!v.conversation) { stopVoice(v.edited ? '文字已追加到草稿，请检查后发送' : '已转成文字，可以修改后发送'); return }
+      v.pendingVoice = { id: uuid(), role: 'user', text: text, mime: 'audio/wav', audio: voiceWav(v.recorded), durationMs: Math.round(v.total * 1000), requestId: uuid() }
+      v.pendingVoice.mode = v.mode === 'call' ? 'call' : 'message'
+      if (v.callId) { v.pendingVoice.callId = v.callId; v.pendingVoice.callStartedAt = v.callStartedAt }
+      return submitVoiceMessage(v)
+    }).catch(function (err) { if (voice === v) stopVoice('语音未完成：' + err.message) }).then(function () {
+      if (voice === v) { v.finishing = false; el.voiceFinish.disabled = false; maybeResumeVoice(v) }
+    })
+  }
+  function submitVoiceMessage(v) {
+    var item = v.pendingVoice, submitGeneration = v.submitGeneration || 0
+    callStage(v, 'storeStartedAt')
+    return storeVoice(v.sid, item).then(function () {
+      if (voice !== v || S.cur !== v.sid) return
+      if (v.mode === 'call' && (v.muted || submitGeneration !== (v.submitGeneration || 0))) {
+        var chat = S.chats.get(v.sid); if (chat) { if (!chat.voiceNotSent) chat.voiceNotSent = new Set(); chat.voiceNotSent.add(item.requestId) }
+        v.pendingVoice = null; v.failedSave = false; v.epoch++; v.sent = 0; v.parts = []; v.count = 0; v.recorded = []; v.preRoll = []; v.preRollCount = 0; v.total = 0; v.text = ''; v.hadSpeech = false; v.quiet = 0; v.chain = Promise.resolve()
+        voiceHint(v, v.muted ? '麦克风已静音，本段未发送' : '正在听，本段录音因静音未发送'); if (chat) draw(chat); return
+      }
+      callStage(v, 'storedAt')
+      v.failedSave = false; el.callInterrupt.textContent = '打断并说'; v.pendingVoice = null; v.replyTo = item.id; v.requestId = item.requestId; v.waiting = true; v.responseSeen = false; v.turnDone = false; v.modelSpeech = false
+      voiceHint(v, '正在等待 DSH 回复…'); el.voiceFinish.textContent = '继续说'
+      callStage(v, 'promptSubmittedAt')
+      send({ voice: true, text: item.text, rid: item.requestId })
+    }).catch(function (error) {
+      if (voice !== v) return
+      v.failedSave = true; voiceHint(v, '语音未发送，原声暂存在此页面：' + error.message); el.voiceFinish.textContent = '重试发送'; el.callInterrupt.textContent = '重试发送'
+    }).then(function () { if (voice === v) { v.finishing = false; el.voiceFinish.disabled = false; if (v.exitToKeyboard) stopVoice(); else syncHoldUi() } })
+  }
+  function continueVoice(v, automatic, prefix) {
+    if (voice !== v || v.finishing) return
+    v.finishing = true; el.voiceFinish.disabled = true
+    if (automatic && isRunning(v.sid)) { v.finishing = false; el.voiceFinish.disabled = false; return }
+    saveVoiceReplies(v).catch(function () { toast('部分回复音频尚未保存') })
+    var cancel = !automatic && isRunning(v.sid) ? rpc('session.cancel', { sessionId: v.sid }) : Promise.resolve()
+    cancel.then(function () { return voiceJson('/voice-mode/cancel', { sessionId: v.sid }) }).then(function () {
+      if (voice !== v) return
+      if (v.player) { try { v.player.stop() } catch (e) {} }
+      v.playGeneration++; v.replyAudio = {}; v.playing = false; v.playChain = Promise.resolve(); v.audioPending = 0; v.ttsBusy = false; v.responseSeen = false; v.captions = {}; v.currentSentence = null
+      v.epoch++; v.callPartialPending = false; v.callTiming = null; v.preRoll = []; v.preRollCount = 0; v.sent = 0; v.parts = prefix ? prefix.slice() : []; v.interrupting = false; v.count = v.parts.reduce(function (n, p) { return n + p.length }, 0); v.recorded = v.parts.slice(); v.total = v.count / 16000; v.hadSpeech = !!prefix; v.quiet = 0; v.barge = []; v.bargeCount = 0; v.detectPositive = 0; v.chain = Promise.resolve()
+      v.base = el.input.value; v.preview = v.base; v.text = ''; v.edited = false; v.waiting = false
+      voiceHint(v, v.mode === 'call' ? '通话中 · 正在听，停顿后自动发送' : '录音中 · 点“说完发送”发送语音消息'); el.voiceFinish.textContent = '说完发送'; voiceIdle(v)
+    }).catch(function (err) { if (voice === v) stopVoice('暂时无法继续：' + err.message) }).then(function () { if (voice === v) { v.finishing = false; el.voiceFinish.disabled = false } })
+  }
+  function voiceAudio(v, frame) {
+    if (voice !== v || !v.conversation || !v.waiting || frame.sessionId !== v.sid) return
+    if (frame.text) {
+      v.captions[frame.sentenceId] = frame.text
+      if (v.currentSentence === frame.sentenceId) el.voiceCaption.textContent = 'DSH：' + frame.text; el.callCaption.textContent = 'DSH：' + frame.text
+    }
+    if (!frame.audio) { if (frame.final) saveVoiceReplies(v, frame.sentenceId).catch(function () { voiceHint(v, '回复音频保存失败，请保留页面') }); return }
+    var receipt = v.replyAudio[frame.sentenceId] || (v.replyAudio[frame.sentenceId] = { id: uuid(), parts: [], replyTo: v.replyTo, requestId: v.requestId })
+    receipt.parts.push({ audio: frame.audio, mime: frame.mime || 'audio/wav', durationMs: frame.durationMs || 0 })
+    v.audioPending++; clearTimeout(v.resumeTimer)
+    var generation = v.playGeneration
+    v.playChain = v.playChain.then(function () {
+      if (voice !== v || generation !== v.playGeneration) return
+      var raw = atob(frame.audio), bytes = new Uint8Array(raw.length)
+      for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
+      return v.ctx.decodeAudioData(bytes.buffer).then(function (buffer) {
+        if (voice !== v || generation !== v.playGeneration) return
+        return new Promise(function (resolve) {
+          var player = v.ctx.createBufferSource(); v.player = player; v.playing = true
+          v.currentSentence = frame.sentenceId
+          el.voiceCaption.textContent = 'DSH：' + (v.captions[frame.sentenceId] || '正在说话…'); el.callCaption.textContent = el.voiceCaption.textContent
+          player.buffer = buffer; player.connect(v.ctx.destination)
+          voiceHint(v, v.mode === 'call' ? (v.autoBarge ? 'DSH 正在说话 · 直接开口可打断' : 'DSH 正在说话 · 点“打断并说”接话') : 'DSH 正在回复语音 · 文字同步显示'); voiceIdle(v)
+          el.voiceFinish.textContent = '打断并说'
+          player.onended = function () { if (generation === v.playGeneration) { v.playing = false; if (v.player === player) v.player = null } resolve() }
+          player.start()
+        })
+      })
+    }).catch(function () { voiceHint(v, '朗读失败，可查看文字或继续说') }).then(function () {
+      if (voice !== v || generation !== v.playGeneration) return
+      v.audioPending = Math.max(0, v.audioPending - 1)
+      if (!v.audioPending) { voiceHint(v, v.mode === 'call' ? '通话中 · 等待回复结束' : '点“继续说”发送下一条语音'); maybeResumeVoice(v) }
+    })
+  }
+  function startVoice(mode) {
+    var conversation = mode !== 'draft'
+    pauseChatVoice(); stopVoicePreview()
+    var sid = S.cur, Audio = window.AudioContext || window.webkitAudioContext
+    if (!sid || isAgent(sid) || voice) return
+    if (voiceStarting) { toast('上一次录音正在收尾，请稍候'); return }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !Audio) { toast('当前环境不支持录音，请更新 App 或使用 HTTPS 浏览器', 'err'); return }
+    if (conversation && (el.input.value.trim() || S.att.length || isRunning(sid))) { toast('请先处理输入框草稿，并等待当前任务完成；也可以先用录音转文字'); return }
+    var v = { sid: sid, tab: uuid(), mode: mode, conversation: conversation, audioPending: 0, ttsBusy: false, responseSeen: false, ctx: new Audio(), epoch: 1, sent: 0, parts: [], count: 0, total: 0, quiet: 0, hadSpeech: false, text: '', base: el.input.value, preview: el.input.value, chain: Promise.resolve(), playChain: Promise.resolve(), playGeneration: 0 }
+    if (mode === 'call') { v.callId = uuid(); v.callStartedAt = new Date().toISOString() }
+    v.preRoll = []; v.preRollCount = 0; v.recorded = []; v.replyAudio = {}; v.barge = []; v.bargeCount = 0; v.detectPositive = 0; v.captions = {}; el.voiceCaption.textContent = ''; el.voiceCaption.hidden = !conversation; el.voiceEnd.hidden = !conversation; el.voiceBar.classList.toggle('dictation', !conversation); el.mic.setAttribute('aria-label', conversation ? '退出语音' : '结束录音')
+    voice = v; voiceStarting = true; el.callPanel.hidden = mode !== 'call'; el.callCaption.textContent = ''; el.callClock.textContent = '00:00'; el.callMute.textContent = '静音'; el.callInterrupt.textContent = '打断并说'; v.startedAt = Date.now(); if (mode === 'call') v.clockTimer = setInterval(function () { var n = Math.floor((Date.now() - v.startedAt) / 1000); el.callClock.textContent = String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0') }, 1000); v.ctx.resume().catch(function () {})
+    el.mic.hidden = true; el.voiceBar.hidden = mode === 'call'; el.voiceFinish.disabled = true; el.voiceFinish.textContent = conversation ? '说完发送' : '结束录音'; voiceHint(v, '正在申请麦克风…'); syncSend()
+    voiceCleanup.then(function () { return navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false }) }).then(function (stream) {
+      if (voice !== v) { stream.getTracks().forEach(function (t) { t.stop() }); return null }
+      v.stream = stream
+      stream.getTracks().forEach(function (track) { track.enabled = !v.muted })
+      var track = stream.getAudioTracks ? stream.getAudioTracks()[0] : stream.getTracks()[0], settings = track && track.getSettings ? track.getSettings() : {}; v.autoBarge = settings.echoCancellation === true
+      if (mode === 'call' && !v.autoBarge) toast('此设备未确认回声消除，请用“打断并说”接话')
+      // Resolve a cold session through the native command inventory, not a
+      // model prompt; this attaches the voice session without billing a turn.
+      return voiceJson('/api/commands/list', { type: 'client-request', rpcId: uuid(), method: 'commands/list', payload: { args: { agentId: sid } } }).then(function (result) {
+        if (!result.result || !result.result.ok) throw new Error('这个对话暂不能开启语音')
+        if (voice !== v) return null
+        v.sse = new EventSource('/voice-mode/stream?tabId=' + enc(v.tab))
+        var baseline = new Promise(function (resolve, reject) {
+          v.rejectMode = reject
+          v.modeTimer = setTimeout(function () { reject(new Error('语音回传连接超时，请重试')) }, 15000)
+          v.sse.addEventListener('mode', function (event) {
+            var f = JSON.parse(event.data)
+            if (!v.modeSeen) { v.modeSeen = true; v.rejectMode = null; clearTimeout(v.modeTimer); resolve(); return }
+            if (v.activated && (f.active !== sid || (f.ownerTabId && f.ownerTabId !== v.tab))) stopVoice('语音已在另一设备切换或结束', false)
+          })
+        })
+        v.sse.onerror = function () {
+          if (voice !== v) return
+          stopVoice('语音连接断开，录音已停止，已保存的语音可在记录中回放')
+          voiceJson('/voice-mode').then(function (status) {
+            if (!voice && status.connections >= status.connectionLimit) toast('语音连接已满，请关闭不用的 DSH 窗口后重试')
+          }).catch(function () {})
+        }
+        v.sse.addEventListener('audio', function (event) { voiceAudio(v, JSON.parse(event.data)) })
+        v.sse.addEventListener('tts-state', function (event) {
+          var f = JSON.parse(event.data)
+          if (voice !== v || f.sessionId !== v.sid) return
+          v.ttsBusy = f.busy; maybeResumeVoice(v); syncHoldUi()
+        })
+        v.sse.addEventListener('turn', function (event) {
+          var f = JSON.parse(event.data)
+          if (voice !== v || !v.waiting || f.sessionId !== v.sid) return
+          if (f.state === 'agent-speaking') { v.modelSpeech = true; v.turnDone = false }
+          if (f.state === 'listening' && v.modelSpeech) { v.turnDone = true; maybeResumeVoice(v); syncHoldUi() }
+        })
+        v.sse.addEventListener('tts-error', function () { voiceHint(v, '朗读暂不可用，请查看文字回复') })
+        // Drain the initial mode snapshot before activation, so a delayed
+        // baseline cannot be mistaken for another device ending our recording.
+        return baseline.then(function () { if (voice !== v) return null; return voiceJson('/voice-mode/toggle', { sessionId: sid, on: true, tabId: v.tab, lang: 'zh', mode: mode === 'call' ? 'call' : mode === 'chat' ? 'message' : 'draft' }) })
+      })
+    }).then(function (result) {
+      if (!result) return
+      v.activated = true
+      if (voice !== v || S.cur !== sid) return voiceJson('/voice-mode/toggle', { sessionId: sid, on: false, tabId: v.tab }).catch(function () {})
+      v.source = v.ctx.createMediaStreamSource(v.stream); v.processor = v.ctx.createScriptProcessor(4096, 1, 1)
+      var silent = v.ctx.createGain(); silent.gain.value = 0
+      v.source.connect(v.processor); v.processor.connect(silent); silent.connect(v.ctx.destination)
+      v.ready = true; el.voiceFinish.disabled = false; el.mic.classList.add('recording'); voiceIdle(v)
+      voiceHint(v, mode === 'call' ? (v.muted ? '麦克风已静音' : '通话中 · 正在听，停顿后自动发送') : conversation ? '录音中 · 点“说完发送”发送语音消息' : '正在听…')
+      v.processor.onaudioprocess = function (event) {
+        if (voice !== v || v.failedSave || v.muted || (v.finishing && !v.interrupting)) return
+        var src = event.inputBuffer.getChannelData(0), ratio = v.ctx.sampleRate / 16000, count = Math.floor(src.length / ratio), pcm = new Float32Array(count), energy = 0
+        for (var i = 0; i < count; i++) { var pos = i * ratio, a = Math.floor(pos), b = Math.min(a + 1, src.length - 1); pcm[i] = src[a] + (src[b] - src[a]) * (pos - a); energy += pcm[i] * pcm[i] }
+        if (v.waiting || v.playing || v.interrupting) { if (v.mode === 'call') detectBarge(v, pcm, Math.sqrt(energy / Math.max(1, count))); return }
+        var seconds = count / 16000, talking = Math.sqrt(energy / Math.max(1, count)) > 0.012
+        if (v.mode === 'call' && !v.hadSpeech) {
+          if (!talking) {
+            // Before the user starts a turn, silence is not an utterance. Keep
+            // only 250 ms so a quiet leading consonant can precede the first
+            // above-threshold frame without accumulating or uploading idle time.
+            v.preRoll.push(pcm); v.preRollCount += count
+            while (v.preRollCount > 4000) {
+              var excess = v.preRollCount - 4000, first = v.preRoll[0]
+              if (first.length <= excess) { v.preRoll.shift(); v.preRollCount -= first.length }
+              else { v.preRoll[0] = first.subarray(excess); v.preRollCount -= excess }
+            }
+            return
+          }
+          v.preRoll.forEach(function (part) { v.parts.push(part); v.recorded.push(part) })
+          v.count += v.preRollCount; v.total += v.preRollCount / 16000
+          v.preRoll = []; v.preRollCount = 0
+        }
+        if (talking) { callStage(v, 'lastSpeechAt'); v.hadSpeech = true; v.quiet = 0; voiceIdle(v) } else v.quiet += seconds
+        v.recorded.push(pcm); v.parts.push(pcm); v.count += count; v.total += seconds
+        if ((v.mode === 'call' && v.hadSpeech && v.quiet > 0.9) || v.total > 55) { if (v.held && holdGesture) releaseHold(false, true); else finishVoice(); return }
+        if (v.count >= 16000 && (v.mode !== 'call' || !v.callPartialPending)) flushVoice(v, false).catch(function (err) { if (voice === v) stopVoice('录音识别中断：' + err.message) })
+      }
+    }).catch(function (err) { if (voice === v) stopVoice(err.name === 'NotAllowedError' ? '麦克风未授权。安卓请更新 App，并在首次录音时允许麦克风。' : '无法开启语音：' + err.message) }).then(function () { voiceStarting = false; syncHoldUi() })
+  }
+  var voicePreview = null, speakerView = 0
+  function stopVoicePreview() {
+    if (!voicePreview) return
+    clearTimeout(voicePreview.timer); voicePreview.controller.abort(); voicePreview.audio.pause(); voicePreview.audio.remove()
+    if (voicePreview.box) voicePreview.box.remove()
+    if (voicePreview.button) voicePreview.button.disabled = false
+    if (voicePreview.url) URL.revokeObjectURL(voicePreview.url)
+    voicePreview = null
+  }
+  function speakerSettings() {
+    var generation = ++speakerView, config, busy = false
+    el.sheet.innerHTML = '<div class="sh-h">声音设置</div><div class="sh-b" id="speakerChoices">正在读取声音…</div>'
+    function paint() {
+      if (generation !== speakerView) return
+      el.sheet.innerHTML = '<div class="sh-h">声音设置</div><div class="sh-b speaker-options">' + config.items.map(function (item) { return '<div class="speaker-row"><button data-speaker="' + esc(item.id) + '"' + (!item.ready || busy ? ' disabled' : '') + ' aria-pressed="' + (config.current === item.id) + '"><b>' + esc(item.name) + '</b><small>' + (item.gender === 'F' ? '女声' : '男声') + (config.current === item.id ? ' · 当前声音' : '') + (item.latencyHint ? ' · ' + esc(item.latencyHint) : '') + (!item.ready ? ' · 暂不可用' : '') + '</small></button><button class="link" data-speaker-preview="' + esc(item.id) + '"' + (!item.ready ? ' disabled' : '') + '>试听</button></div>' }).join('') + '<div id="speakerPreview"></div></div>'
+    }
+    voiceJson('/voice-mode/speakers').then(function (out) { if (generation !== speakerView) return; config = out; paint() }, function (error) { if (generation === speakerView) el.sheet.innerHTML = '<div class="sh-h">声音设置</div><p>' + esc(error.message) + '</p>' })
+    el.sheet.onclick = function (event) {
+      if (!config || generation !== speakerView) return
+      var preview = event.target.closest('[data-speaker-preview]'), select = event.target.closest('[data-speaker]'), id = preview ? preview.dataset.speakerPreview : select && select.dataset.speaker
+      if (!id || !config.items.some(function (item) { return item.id === id && item.ready })) return
+      if (preview) {
+        stopVoicePreview()
+        var audio = document.createElement('audio'), controller = new AbortController(), current = { audio: audio, controller: controller, url: null }
+        voicePreview = current; audio.controls = true; audio.hidden = true
+        var previewBox = document.createElement('div'), previewStatus = document.createElement('p'), row = typeof preview.closest === 'function' ? preview.closest('.speaker-row') : null
+        previewBox.className = 'speaker-preview-inline'; previewStatus.className = 'speaker-preview-status'; previewStatus.setAttribute('role', 'status'); previewStatus.textContent = '正在合成试听…模型首次准备较慢，请稍候'
+        current.box = previewBox; current.button = preview; preview.disabled = true
+        previewBox.appendChild(previewStatus); previewBox.appendChild(audio); (row || document.getElementById('speakerPreview')).appendChild(previewBox); previewBox.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+        current.timer = setTimeout(function () { if (voicePreview === current) { controller.abort(); preview.disabled = false; previewStatus.textContent = '试听等待较久，已停止本次等待，可再次点试听重试' } }, 180000)
+        fetch('/voice-mode/preview', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ voice: id, rate: config.rate }), signal: controller.signal }).then(function (response) { if (!response.ok) return response.json().catch(function () { return {} }).then(function (error) { throw new Error(error.error || '试听暂不可用') }); return response.blob() }).then(function (blob) {
+          if (voicePreview !== current || generation !== speakerView) return
+          clearTimeout(current.timer); preview.disabled = false; current.url = URL.createObjectURL(blob); audio.src = current.url; audio.hidden = false; previewStatus.textContent = '试听已准备好'; return audio.play().catch(function () { previewStatus.textContent = '请点下方播放器试听' })
+        }).catch(function (error) { clearTimeout(current.timer); preview.disabled = false; if (voicePreview === current && error.name !== 'AbortError') { previewStatus.textContent = '试听失败：' + error.message + '，可再次点试听重试'; toast(error.message) } })
+        return
+      }
+      if (busy) return
+      busy = true; stopVoicePreview(); paint()
+      voiceJson('/voice-mode/speakers', { voice: id }).then(function (out) { if (!out.ok) throw new Error(out.error || '声音设置失败'); config.current = out.voice; config.rate = out.rate; toast('声音已切换') }).catch(function (error) { toast(error.message) }).then(function () { busy = false; paint() })
+    }
+  }
+  function voiceMenu() {
+    if (voice) { stopVoice('已退出语音，识别文字保留在输入框'); return }
+    openSheet('<div class="sh-h">语音</div><div class="sh-b"><button class="opt-row" data-voice="draft"><span class="mid"><b>录音转文字</b><small>点击开始说话，转成文字后手动发送</small></span></button><button class="opt-row" data-voice="chat"><span class="mid"><b>语音消息</b><small>按住说话，松开发送，上滑取消</small></span></button><button class="opt-row" data-voice="call"><span class="mid"><b>实时语音通话</b><small>接通后直接聊天，可开口打断，带实时字幕</small></span></button><div class="voice-settings-divider"></div><button class="opt-row" data-speaker-settings><span class="mid"><b>声音设置</b><small>选择声音或试听</small></span></button></div>')
+    el.sheet.onclick = function (event) { if (event.target.closest('[data-speaker-settings]')) { speakerSettings(); return } var b = event.target.closest('[data-voice]'); if (!b) return; closeOverlay(); if (b.dataset.voice === 'chat') chooseHoldMode('chat'); else { holdMode = null; syncHoldUi(); startVoice(b.dataset.voice) } }
+  }
+
+  var PERMISSIONS = {
+    'read-only': ['只读', 'Read Only', '仅查看文件，不修改'],
+    'workspace-write': ['工作区写入', 'Workspace Write', '可修改当前项目，越界操作需审批'],
+    'danger-full-access': ['完全访问', 'Full access', '可访问工作区外的文件，执行时不再请求审批'],
+  }
+  function renderPermission(c) {
+    if (c.id !== S.cur) return
+    el.permission.hidden = isAgent(c.id)
+    el.permission.disabled = Boolean(c.permissionBusy)
+    var value = c.permissions && c.permissions.currentValue
+    el.permission.innerHTML = ic('shield', 's') + esc(c.permissionBusy ? '切换中…' : (PERMISSIONS[value] || [value === 'custom' ? '自定义权限' : '权限设置'])[0]) + ic('down', 's')
+  }
+  function loadPermissions(c) {
+    var revision = c.permissionRevision || 0
+    return rpc('session.permissions', { sessionId: c.id }).then(function (v) {
+      if ((c.permissionRevision || 0) === revision) c.permissions = v
+      renderPermission(c)
+      return c.permissions
+    })
+  }
+  function permissionSheet() {
+    var c = S.chats.get(S.cur)
+    if (!c || isAgent(c.id) || c.permissionBusy) return
+    openSheet('<div class="sh-h">会话权限</div><div class="sh-b" id="permissionOptions">正在读取…</div>')
+    var box = document.getElementById('permissionOptions')
+    function paint() {
+      if (!hasOverlay('sheet') || document.getElementById('permissionOptions') !== box) return
+      box.innerHTML = c.permissions.options.filter(function (o) { return PERMISSIONS[o.value] }).map(function (o) {
+        var labels = PERMISSIONS[o.value], active = c.permissions.currentValue === o.value
+        return '<button class="opt-row' + (active ? ' permission-active' : '') + '" data-permission="' + esc(o.value) + '" aria-pressed="' + active + '"' + (c.permissionBusy ? ' disabled' : '') + '><span class="ico">' + ic('shield', 's') + '</span><span class="mid"><b>' + labels[0] + ' · ' + labels[1] + '</b><small>' + labels[2] + '</small></span>' + (active ? ic('check', 's') : '') + '</button>'
+      }).join('')
+    }
+    c.paintPermissions = paint
+    loadPermissions(c).then(paint, function (err) { box.textContent = err.message })
+    el.sheet.onclick = function (e) {
+      var b = e.target.closest('[data-permission]')
+      if (!b || c.permissionBusy || !c.permissions) return
+      var preset = b.dataset.permission
+      if (!PERMISSIONS[preset] || !c.permissions.options.some(function (o) { return o.value === preset })) return
+      if (preset === c.permissions.currentValue) { closeOverlay(); return }
+      var full = preset === 'danger-full-access'
+      if (full && !window.confirm('启用完全访问？\n\nDSH 将能修改工作区外的文件、执行命令，并且不再请求操作审批。仅对当前会话生效。')) return
+      c.permissionBusy = true
+      paint(); renderPermission(c)
+      rpc('session.selectPermission', { sessionId: c.id, preset: preset, confirmFullAccess: full }).then(function (v) {
+        c.permissions = v; c.permissionRevision = (c.permissionRevision || 0) + 1
+        if (c.id === S.cur && document.getElementById('permissionOptions') === box) closeOverlay()
+        toast('已切换为' + PERMISSIONS[v.currentValue][0]); buzz()
+      }, function (err) {
+        toast(err.message + '；请重新打开权限菜单核对状态', 'err')
+        return loadPermissions(c).catch(function () { c.permissions = null })
+      }).then(function () { c.permissionBusy = false; renderPermission(c); if (c.permissions) paint() })
+    }
+  }
+
   // ------------------------------------------------------------ chat: live frames
   function onFrame(f) {
     switch (f.t) {
       case 'p': return
+      case 'voiceSaved': {
+        if (!f.s || f.s !== S.cur || isAgent(f.s) || !f.item) return
+        var owner = S.chats.get(f.s); if (!owner) return
+        if (f.item.mode === 'message' && !f.item.callId) mergeConfirmedVoice(f.s, f.item)
+        else Promise.resolve(owner.voiceLoading).then(function () { if (S.cur === f.s) loadVoiceHistory(f.s) })
+        return
+      }
       case 'hello':
         S.hellos++
         setStatus('online')
@@ -930,6 +1695,11 @@
       case 'list': return scheduleBoot()
       case 'agents': return scheduleAgents()
       case 'title': return setTitle(f.s, f.title)
+      case 'permissions': {
+        var pc = S.chats.get(f.s)
+        if (pc) { pc.permissions = f.value; pc.permissionRevision = (pc.permissionRevision || 0) + 1; renderPermission(pc); if (pc.paintPermissions && pc.permissions) pc.paintPermissions() }
+        return
+      }
       case 'ask': S.asks.set(f.id, f); buzz(30); return onPending(f.s)
       case 'askDone': { var a = S.asks.get(f.id); S.asks.delete(f.id); return onPending((a && a.s) || f.s) }
       case 'q': S.qs.set(f.rpc, f); buzz(30); return onPending(f.s)
@@ -988,7 +1758,7 @@
           if (i >= 0) c.pending.splice(i, 1)
           touch(c.id)
         }
-        if (it.k === 'end') { c.partial = null; touch(c.id) }
+        if (it.k === 'end') { c.partial = null; touch(c.id); loadVoiceHistory(c.id) }
         c.items.push(it)
         pruneQueue(c)
         draw(c)
@@ -1015,7 +1785,7 @@
   function resync() {
     loadBoot().catch(function () {})
     S.chats.forEach(function (c) {
-      if (c.id === S.cur) loadHistory(c)
+      if (c.id === S.cur) { loadHistory(c); if (!isAgent(c.id)) { loadVoiceHistory(c.id); loadPermissions(c).catch(function () {}) } }
       else { c.loaded = false; c.partial = null }
     })
   }
@@ -1040,6 +1810,7 @@
   function renderHead() {
     var c = S.chats.get(S.cur)
     if (!c) return
+    renderPermission(c)
     var s = S.byId[c.id], ag = isAgent(c.id) && agentOf(c.id)
     el.cTitle.textContent = (ag && (ag.title || ag.project)) || (s && s.title) || c.title || (isAgent(c.id) ? '外部会话' : '新对话')
     var sub = ''
@@ -1051,11 +1822,11 @@
     if (s && s.cx >= 70) sub += ' · <span class="warn">上下文 ' + s.cx + '%</span>'
     el.cSub.innerHTML = sub
   }
-  function userHtml(c, it) {
+  function userHtml(c, it, audioItem) {
     var imgs = (it.imgs || []).map(function (im) {
       return '<img loading="lazy" data-view src="' + esc(im.url || imgUrl(c.id, im.id)) + '" alt="">'
     }).join('')
-    return '<div class="u' + (it.pending ? ' pending' : '') + '">' + (imgs ? '<div class="imgs">' + imgs + '</div>' : '') + (it.text ? '<div class="bub">' + esc(it.text) + '</div>' : '') + '</div>'
+    return '<div class="u' + (it.pending ? ' pending' : '') + '">' + (imgs ? '<div class="imgs">' + imgs + '</div>' : '') + (audioItem ? '<div class="voice-user">' + voiceBubbleHtml(c, audioItem, it.text || audioItem.text, it.pending ? '正在确认发送…' : '') + '</div>' : it.text ? '<div class="bub">' + esc(it.text) + '</div>' : '') + '</div>'
   }
   function resultExcerpt(text) {
     var first = text.trim().split(/\n\s*\n/)[0].replace(/\[([^\]]+)\]\((?:<[^>]*>|[^)]*)\)/g, '$1')
@@ -1063,8 +1834,11 @@
     var chars = Array.from(first)
     return chars.slice(0, 120).join('') + (chars.length > 120 ? '…' : '')
   }
-  function asstHtml(it, c, resultOnly, completed) {
+  function asstHtml(it, c, resultOnly, completed, audioItem, voiceOwner) {
     var h = '<div class="a" data-message-seq="' + esc(it.seq) + '">'
+    var pendingVoice = !audioItem && voiceOwner && voiceOwner.mode === 'message'
+    if (audioItem) h += voiceBubbleHtml(c, audioItem, '', '')
+    else if (pendingVoice) h += pendingVoiceHtml(c, voiceOwner)
     if (it.think && !resultOnly) {
       h += '<button class="think" data-think="' + it.seq + '">' + ic('bulb', 's') + '思考过程' + ic(it._t ? 'down' : 'chev', 's') + '</button>'
       if (it._t) h += '<div class="think-body">' + esc(it.think) + '</div>'
@@ -1076,9 +1850,10 @@
         it._h = md(it.text, ctx); it._paths = ctx.paths; it._root = root
       }
       var folded = resultOnly && completed && (it.text.length > 600 || it.text.split('\n').length > 12)
-      if (folded) {
+      if (audioItem || pendingVoice) h += voiceTextHtml(c, audioItem || { role: 'assistant', replyTo: voiceOwner.id }, '<div class="md">' + it._h + '</div>')
+      else if (folded) {
         var opened = c.resultOpen && c.resultOpen.has(it.seq)
-        h += '<div class="result-excerpt">' + esc(resultExcerpt(it.text)) + '</div><details class="result-details" data-result-details="' + it.seq + '"' + (opened ? ' open' : '') + '><summary>查看完整结果</summary><div class="md">' + it._h + '</div></details>'
+        h += '<div class="result-excerpt"' + (opened ? ' hidden' : '') + '>' + esc(resultExcerpt(it.text)) + '</div><details class="result-details" data-result-details="' + it.seq + '"' + (opened ? ' open' : '') + '><summary>查看完整结果</summary><div class="md">' + it._h + '</div></details>'
       } else h += '<div class="md">' + it._h + '</div>'
       if (resultOnly) h += (it._paths || []).filter(videoPath).map(function (p) {
         return '<div class="artifact"><div class="artifact-head"><b>' + esc(baseName(p)) + '</b><button data-result-path="' + esc(p) + '">' + ic('folder', 's') + '所在文件夹</button></div>' +
@@ -1087,7 +1862,7 @@
       if (folded) h += (it._paths || []).filter(function (p) { return !videoPath(p) }).map(function (p) {
         return '<div class="artifact artifact-file"><div class="artifact-head"><b>' + esc(baseName(p)) + '</b><button data-result-path="' + esc(p) + '">' + ic('folder', 's') + '所在文件夹</button></div></div>'
       }).join('')
-      if (it._fin) h += '<div class="acts"><button data-copymsg="' + it.seq + '">' + ic('copy', 's') + '复制</button></div>'
+      if (it._fin && !audioItem && !pendingVoice) h += '<div class="acts"><button data-copymsg="' + it.seq + '">' + ic('copy', 's') + '复制</button></div>'
     }
     return h + '</div>'
   }
@@ -1138,11 +1913,15 @@
     return '<div class="end' + (bad ? ' bad' : '') + '">' + esc(END[it.reason] || it.reason) + (it.ms ? ' · ' + dur(it.ms) : '') + '</div>'
   }
   function renderMsgs(c, jump, keep) {
+    if (c.id === S.cur) syncSuggestion()
     if (c.id !== S.cur) return
     // Detaching a fullscreen element exits native fullscreen and interrupts
     // WebView playback. Receive frames normally and paint once after exit.
     var fullscreen = fullVideo || nativeVideo
     if (fullscreen && fullscreen.v.dataset.session === c.id && fullscreen.v.getAttribute('data-message-seq') != null) { fullscreen.redraw = true; return }
+    var activeVoice = Array.prototype.find.call(el.msgs.querySelectorAll('audio[data-voice-id]'), function (audio) { return audio.dataset.session === c.id && !audio.paused && !audio.ended })
+    if (activeVoice) { c.voiceRepaint = true; drawTail(c); return }
+    c.voiceRepaint = false
     var stick = jump || (!keep && nearBottom())
     if (!c.loaded) {
       el.older.innerHTML = ''
@@ -1156,28 +1935,67 @@
     c.items.forEach(function (it, i) { if (it.k === 't') it._spin = running && !it.done && i > lastEnd })
     // One expandable process per turn. The last text answer is the result;
     // live commentary and tool output never create a wall above it.
-    var h = '', turn = []
+    c.voicePendingReply = false
+    var h = '', turn = [], turnVoice = null, usedVoice = new Set(), voiceItems = c.voiceItems || []
+    var callGroups = new Map(), shownCalls = new Set()
+    voiceItems.forEach(function (item) { if (item.mode !== 'call' || !item.callId || item.role !== 'user') return; var group = callGroups.get(item.callId) || { id: item.callId, start: item.callStartedAt, rounds: 0, lastRequest: null }; group.rounds++; group.lastRequest = item.requestId; callGroups.set(item.callId, group) })
+    function callSummary(item) {
+      var group = item && item.callId && callGroups.get(item.callId)
+      if (!group || shownCalls.has(group.id) || item.requestId !== group.lastRequest) return ''
+      shownCalls.add(group.id)
+      var active = voice && voice.callId === group.id, time = group.start ? new Date(group.start).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''
+      return '<button class="call-record" data-call-locate="' + esc(group.id) + '"><b>' + (active ? '语音通话中' : '语音通话记录') + '</b><span>' + esc(time) + ' 开始 · ' + group.rounds + '轮对话</span><small>查看本次通话</small></button>'
+    }
+    function userVoice(it) { return it.rid && voiceItems.find(function (item) { return item.role === 'user' && item.requestId === it.rid }) }
+    function replyVoice() { return turnVoice && voiceItems.find(function (item) { return item.role === 'assistant' && !usedVoice.has(item.id) && item.replyTo === turnVoice.id && item.requestId === turnVoice.requestId }) }
+    function appendUser(it) { var item = userVoice(it); if (item) usedVoice.add(item.id); h += userHtml(c, it, item); return item }
     function flush(done) {
-      if (!turn.length) return
+      if (!turn.length && !replyVoice()) return
       var final = null, end = null
       turn.forEach(function (it) { if (it.k === 'a') { it._fin = false; if (it.text) final = it } else if (it.k === 'end') end = it })
       if (!done) final = null
       if (final) final._fin = true
+      var reply = replyVoice()
+      if (final) { if (reply) usedVoice.add(reply.id); h += asstHtml(final, c, true, end && end.reason === 'completed', reply, turnVoice) }
+      else if (reply) { usedVoice.add(reply.id); h += '<div class="a voice-awaiting">' + voiceBubbleHtml(c, reply, done ? reply.text : '', done ? '语音回复' : '回复文字正在同步…') + '</div>' }
       h += processHtml(c, turn, final, !done)
-      if (final) h += asstHtml(final, c, true, end && end.reason === 'completed')
-      if (end) h += endHtml(end)
+      if (end && (end.reason !== 'completed' || turn.some(function (item) { return item.k === 't' }))) h += endHtml(end)
+      if (done) h += callSummary(turnVoice)
       turn = []
     }
     c.items.forEach(function (it) {
-      if (it.k === 'u') { flush(true); h += userHtml(c, it) }
+      if (it.k === 'u') { flush(true); turnVoice = appendUser(it) }
       else { turn.push(it); if (it.k === 'end') flush(true) }
     })
     flush(!running)
-    c.pending.forEach(function (p) { h += userHtml(c, p) })
+    c.pending.forEach(function (p) { turnVoice = appendUser(p); flush(false) })
+    var unmatchedVoice = '', unmatchedCount = 0, deferredVoiceCount = 0
+    voiceItems.forEach(function (item) {
+      if (usedVoice.has(item.id)) return
+      var recentUnsent = (c.voiceNotSent && c.voiceNotSent.has(item.requestId)) || (c.voiceUnknown && c.voiceUnknown.has(item.requestId))
+      if (c.hasMore && !recentUnsent) { deferredVoiceCount++; return }
+      var status = c.voiceNotSent && c.voiceNotSent.has(item.requestId) ? '录音已保存，本段因静音未发送' : c.voiceUnknown && c.voiceUnknown.has(item.requestId) ? '发送状态未确认；请先核对对话，不会自动重发' : c.hasMore ? '更早的语音，当前消息页尚未加载对应回合' : '已保存的语音，尚未关联当前对话回合'
+      var orphan = '<div class="' + (item.role === 'user' ? 'u' : 'a') + ' voice-orphan">' + voiceBubbleHtml(c, item, item.text, status) + '</div>'
+      if (item.role === 'user') orphan += callSummary(item)
+      if (recentUnsent) h += orphan
+      else { unmatchedVoice += orphan; unmatchedCount++ }
+    })
+    if (deferredVoiceCount) el.older.innerHTML += '<p class="voice-history-pending">' + deferredVoiceCount + ' 条语音记录待定位，加载更早消息后自动归位</p>'
+    if (unmatchedCount) h = '<details class="voice-unmatched" data-voice-unmatched' + (c.voiceUnmatchedOpen ? ' open' : '') + '><summary>未关联的语音记录 · ' + unmatchedCount + '</summary><p>全部消息已加载；这些原始录音仍未关联到对话回合，展开可回放。</p>' + unmatchedVoice + '</details>' + h
     if (!h && isAgent(c.id)) { var ag = agentOf(c.id); h = '<div class="hint"><b>' + esc(ag ? ag.project || ag.name : '外部会话') + '</b>这个会话的记录会出现在这里，也可以从手机继续它</div>' }
     if (!h) h = '<div class="hint"><b>' + esc(wsTitle(wsOf(c.id))) + '</b>发一条消息开始</div>'
     var playing = Array.prototype.filter.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v._fullscreen || v._preparing || v._previewError || !v.paused || v.currentTime > 0 })
+    var savedVoice = Array.prototype.slice.call(el.msgs.querySelectorAll('audio[data-voice-id]'))
     el.msgs.innerHTML = h
+    el.msgs.querySelectorAll('audio[data-voice-id]').forEach(function (audio) {
+      var previous = savedVoice.find(function (old) { return old.dataset.session === c.id && old.dataset.voiceId === audio.dataset.voiceId && old.dataset.voiceRevision === audio.dataset.voiceRevision })
+      if (previous) { audio.parentNode.replaceChild(previous, audio); audio = previous }
+      paintVoicePlayback(audio)
+      audio.onplay = function () { el.msgs.querySelectorAll('audio[data-voice-id]').forEach(function (other) { if (other !== audio) other.pause() }); paintVoicePlayback(audio) }
+      audio.onpause = function () { paintVoicePlayback(audio); if (c.voiceRepaint && S.cur === c.id) renderMsgs(c, false, true) }
+      audio.onended = function () { paintVoicePlayback(audio); advanceVoiceQueue(audio); if (c.voiceRepaint && S.cur === c.id) renderMsgs(c, false, true) }
+      audio.onerror = function () { stopVoiceQueue(); loadVoiceHistory(c.id); toast('语音暂不可播放，已刷新记录，请重新点播放') }
+    })
     el.msgs.querySelectorAll('video[data-artifact]').forEach(function (v) {
       var index = playing.findIndex(function (old) { return old.getAttribute('data-message-seq') === v.getAttribute('data-message-seq') && old.getAttribute('data-session') === v.getAttribute('data-session') && old.getAttribute('data-artifact') === v.getAttribute('data-artifact') })
       if (index >= 0) { var previous = playing.splice(index, 1)[0]; v.parentNode.replaceChild(previous, v) }
@@ -1241,6 +2059,48 @@
       return '<div class="todo ' + esc(x.status) + '">' + ic(x.status === 'completed' ? 'checkc' : x.status === 'in_progress' ? 'dotc' : 'circle', 's') + '<span>' + esc(x.content) + '</span></div>'
     }).join('') + '</div>'
   }
+  function asyncDraftKey(sid, id) { return sid + ':' + id }
+  function asyncDraft(sid, id) { var key = asyncDraftKey(sid, id); return S.asyncDrafts[key] || (S.asyncDrafts[key] = { text: '' }) }
+  function saveAsyncDrafts() { store.set('async-question-drafts', S.asyncDrafts) }
+  function loadAsyncQuestions(sid) {
+    var c = S.chats.get(sid)
+    if (!c || isAgent(sid) || c.asyncLoading) return Promise.resolve()
+    c.asyncLoading = true
+    return get('/m/api/async-questions?s=' + enc(sid)).then(function (value) {
+      c.asyncQuestions = value.items || []
+      var needsAnswer = c.asyncQuestions.filter(function (q) { return q.status === 'waiting' || q.status === 'deferred' || (q.status === 'answered' && q.delivery !== 'accepted' && q.delivery !== 'not-needed') }).length
+      if (S.byId[sid] && S.byId[sid].aq !== needsAnswer) { S.byId[sid].aq = needsAnswer; scheduleHome() }
+      c.asyncQuestions.forEach(function (q) { if (q.status === 'answered' && (q.delivery === 'accepted' || q.delivery === 'not-needed')) delete S.asyncDrafts[asyncDraftKey(sid, q.id)] })
+      saveAsyncDrafts(); if (S.cur === sid) drawDock()
+    }).catch(function () {}).then(function () { c.asyncLoading = false })
+  }
+  function asyncQuestionHtml(c) {
+    var waiting = ''
+    ;(c.asyncQuestions || []).forEach(function (q) {
+      var draft = asyncDraft(c.id, q.id), uncertain = q.delivery === 'unknown' || q.delivery === 'pending' || (q.status === 'answered' && q.delivery !== 'accepted' && q.delivery !== 'not-needed') || draft.delivery === 'unknown' || draft.delivery === 'sending'
+      if (!uncertain && (q.status === 'answered' || draft.delivery === 'accepted')) return
+      if (q.status !== 'waiting' && q.status !== 'deferred' && !uncertain) return
+      var busy = c.asyncSubmitting === q.id, deadline = new Date(q.deadline).getTime(), remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000)), elapsed = q.status === 'deferred' || remaining === 0
+      var hint = elapsed ? '等待时间已到，可继续独立完成的工作不受影响；你仍可稍后回答。' : '可稍后回答' + (Number.isFinite(remaining) ? ' · 等待 ' + remaining + ' 秒后继续独立工作' : '')
+      waiting += '<div class="card async-question" data-async-question="' + esc(q.id) + '"><div class="ch">需要你补充的信息</div><div class="ct">' + esc(q.question) + '</div>'
+      if (q.independentWork) waiting += '<p class="async-independent">可继续：' + esc(q.independentWork) + '</p>'
+      if (uncertain) {
+        waiting += '<p class="async-answer">' + esc(draft.text || (q.answer && q.answer.text) || '') + '</p><p class="cw">' + (busy ? '正在提交回答…' : '回答发送状态待核对；不会自动重投。') + '</p><button class="link" data-async-refresh>刷新状态</button></div>'; return
+      }
+      waiting += '<p class="async-hint">' + esc(hint) + '</p><div class="opts">' + (q.options || []).map(function (option, index) { return '<button class="opt' + (draft.text === option ? ' on' : '') + '" data-async-option="' + index + '">' + esc(option) + '</button>' }).join('') + '</div><textarea class="qin" data-async-input maxlength="8000" placeholder="选择一项，或在这里回答">' + esc(draft.text) + '</textarea><div class="btns"><button class="btn pri" data-async-submit>提交回答</button></div></div>'
+    })
+    return waiting
+  }
+  function submitAsyncAnswer(c, q) {
+    var draft = asyncDraft(c.id, q.id), answer = draft.text.trim()
+    if (c.asyncSubmitting || draft.delivery === 'sending' || draft.delivery === 'unknown' || draft.delivery === 'accepted' || q.delivery === 'unknown' || q.delivery === 'pending') return
+    if (!answer) { toast('请先选择或填写回答'); return }
+    draft.answerId = draft.answerId || uuid(); draft.delivery = 'sending'; saveAsyncDrafts(); c.asyncSubmitting = q.id; drawDock()
+    post('/m/api/async-questions', { s: c.id, id: q.id, answer: answer, answerId: draft.answerId }).then(function (value) {
+      draft.delivery = value && value.status === 'answered' && (value.delivery === 'accepted' || value.delivery === 'not-needed') ? 'accepted' : 'unknown'; saveAsyncDrafts()
+      toast(draft.delivery === 'unknown' ? '回答已保存，发送状态待核对' : value.delivery === 'accepted' ? '回答已进入原会话，等待后续处理' : '回答已提交')
+    }).catch(function () { draft.delivery = 'unknown'; saveAsyncDrafts(); toast('发送状态待核对，请刷新确认，不会自动重投') }).then(function () { c.asyncSubmitting = null; if (S.cur === c.id) drawDock(); loadAsyncQuestions(c.id) })
+  }
   var dockDirty = false
   // A queued message leaves the inbox as soon as DSH delivers it into the
   // session. When it lands while the phone's stream is down, the queue frame
@@ -1259,6 +2119,7 @@
     }
   }
   function drawDock() {
+    syncSuggestion()
     var c = S.cur && S.chats.get(S.cur)
     if (!c) { el.dock.innerHTML = ''; return }
     // Hold re-renders only while the user is typing into a dock input; a
@@ -1269,6 +2130,7 @@
     var h = ''
     S.asks.forEach(function (a) { if (a.s === c.id) h += askHtml(c, a) })
     S.qs.forEach(function (q) { if (q.s === c.id) h += qHtml(q) })
+    h += asyncQuestionHtml(c)
     ;(c.queue || []).forEach(function (x) {
       var busy = c.queueBusy && c.queueBusy[x.id], disabled = busy ? ' disabled' : ''
       h += '<div class="qitem"><span>' + esc(x.text || '图片') + '</span><em>' + (busy ? '处理中…' : x.place === 'steering' ? '等待接收插话' : '排队中') + '</em>'
@@ -1292,6 +2154,10 @@
     el.input.style.height = Math.min(150, el.input.scrollHeight) + 'px'
   }
   function syncSend() {
+    syncSuggestion()
+    if (voice && voice.sid === S.cur && voice.mode === 'draft') {
+      el.send.className = 'send'; el.send.innerHTML = ic('send'); el.send.disabled = true; el.send.setAttribute('aria-label', '请先结束录音，再发送文字'); return
+    }
     if (S.cur && isAgent(S.cur)) {
       // No stop button: a turn running on the PC is stopped there.
       el.send.className = 'send'
@@ -1349,23 +2215,27 @@
       setTimeout(function () { if (S.cur === c.id) loadHistory(c) }, 3000)
     }, function (e) { syncSend(); toast('没发出去：' + e.message, 'err') })
   }
-  function send() {
+  function send(voiceSend) {
+    if (voice && voice.sid === S.cur && voice.mode === 'draft') { toast('请先结束录音，保留最后一句后再发送'); return }
     var c = S.cur && S.chats.get(S.cur)
     if (!c) return
     if (isAgent(c.id)) { sendAgent(c); return }
-    var text = el.input.value.trim(), att = S.att
+    var directVoice = voiceSend && voiceSend.voice === true
+    var text = directVoice ? voiceSend.text : el.input.value.trim(), att = directVoice ? [] : S.att
     if (!text && !att.length) return
-    var rid = uuid(), content = []
+    var rid = directVoice ? voiceSend.rid : uuid(), content = []
     att.forEach(function (a) { content.push({ type: 'image', mediaType: a.type, data: a.b64, name: a.name }) })
     if (text) content.push({ type: 'text', text: text })
     var busy = isRunning(c.id)
     var pend = { k: 'u', rid: rid, text: text, imgs: att.map(function (a) { return { url: a.url } }), pending: true }
     if (!busy) { c.pending.push(pend); renderMsgs(c, true) }
+    if (!directVoice) {
     el.input.value = ''
     delete S.drafts[c.id]
     store.set('drafts', S.drafts)
     S.att = []
     drawThumbs(); autosize(); syncSend()
+    }
     buzz(8)
     rpc('session.prompt', { sessionId: c.id, mode: 'queue', content: content, clientTimeZone: TZ }, rid).then(function (v) {
       if (v && v.command) {
@@ -1379,7 +2249,9 @@
     }, function (e) {
       c.pending = c.pending.filter(function (p) { return p !== pend })
       draw(c)
-      if (!el.input.value) { el.input.value = text; autosize(); syncSend() }
+      if (!directVoice && !el.input.value) { el.input.value = text; autosize(); syncSend() }
+      if (directVoice) { if (!c.voiceUnknown) c.voiceUnknown = new Set(); c.voiceUnknown.add(rid); draw(c) }
+      if (voice && voice.sid === c.id && voice.waiting) stopVoice('发送结果未确认，语音已停止；请核对对话后再发送')
       toast('没发出去：' + e.message, 'err')
     })
   }
@@ -1467,8 +2339,24 @@
     var pre = S.filter !== 'all' && S.filter !== 'none' ? S.filter : null
     openSheet('<div class="sh-h">新对话<small>选择在哪个工作区里干活</small></div><div class="sh-b">' + sortedWorkspaces().map(function (w) {
       return '<button class="opt-row' + (w.id === pre ? ' on' : '') + '" data-w="' + esc(w.id) + '"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>' + esc(w.title) + '</b><small>' + esc(w.path) + '</small></span>' + ic('chev', 's') + '</button>'
-    }).join('') + '</div>')
+    }).join('') + '<button class="opt-row" data-browse-folder><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>浏览电脑文件夹</b><small>选择电脑上的文件夹作为工作区</small></span>' + ic('chev', 's') + '</button></div>')
+    var owner = overlays[overlays.length - 1], browsing = false
     el.sheet.onclick = function (e) {
+      var browse = e.target.closest('[data-browse-folder]')
+      if (browse) {
+        if (browsing) return
+        if (!window.DSHFolderPicker) { toast('文件夹选择器尚未加载，请刷新页面'); return }
+        browsing = true; browse.disabled = true
+        window.DSHFolderPicker.choose().then(function (workspace) {
+          if (!workspace) return
+          var item = { id: workspace.workspaceId || workspace.id, title: workspace.title || workspace.name || workspace.path, path: workspace.path }
+          if (!S.wsById[item.id]) S.ws.push(item)
+          S.wsById[item.id] = item
+          if (overlays.indexOf(owner) < 0) { toast('工作区已添加，可在新对话中选择'); return }
+          closeOverlay().then(function () { startChat(item.id) })
+        }).catch(function (error) { toast(error.message, 'err') }).then(function () { browsing = false; browse.disabled = false })
+        return
+      }
       var b = e.target.closest('[data-w]')
       if (!b || b.disabled) return
       b.disabled = true
@@ -1551,6 +2439,7 @@
     openSheet('<div class="sh-h">' + esc(el.cTitle.textContent) + '</div><div class="sh-b">' +
       '<button class="opt-row" data-a="model"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>切换模型</b><small>' + esc(modelName(c) || '当前模型') + '</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="files"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>工作区文件</b><small>' + esc(wsTitle(wsOf(c.id))) + '</small></span>' + ic('chev', 's') + '</button>' +
+      '<button class="opt-row" data-a="tasks"><span class="ico">' + ic('stats', 's') + '</span><span class="mid"><b>自动任务</b><small>定时执行、目标计划与进度</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="usage"><span class="ico">' + ic('stats', 's') + '</span><span class="mid"><b>用量</b><small>token、缓存命中、上下文占用、耗时</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="reload"><span class="ico">' + ic('refresh', 's') + '</span><span class="mid"><b>更新界面并重连</b><small>保存文字草稿，加载最新界面</small></span></button>' +
       '<button class="opt-row" data-a="rename"><span class="ico">' + ic('pen', 's') + '</span><span class="mid"><b>重命名</b></span></button>' +
@@ -1559,6 +2448,11 @@
       var b = e.target.closest('[data-a]')
       if (!b) return
       var a = b.dataset.a
+      if (a === 'tasks') {
+        if (voice || voiceStarting || holdGesture) { toast('请先结束当前语音，再打开自动任务'); return }
+        if (S.att.length) { toast('请先发送或移除已添加的图片，避免丢失附件'); return }
+        saveDraft(); location.href = '/m/tasks.html?s=' + enc(c.id); return
+      }
       if (a === 'reload') { reloadUi(); return }
       if (a === 'archive' && !b.dataset.sure) { b.dataset.sure = '1'; b.querySelector('b').textContent = '再点一次确认归档'; buzz(); return }
       closeOverlay().then(function () {
@@ -1739,6 +2633,7 @@
   }
   setInterval(function () {
     if (document.visibilityState === 'visible' && es && Date.now() - lastBeat > 40000) connect()
+    if (document.visibilityState === 'visible' && S.cur && S.status === 'online') loadVoiceHistory(S.cur)
   }, 10000)
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState !== 'visible') { saveDraft(); return }
@@ -1873,6 +2768,24 @@
   el.fab.onclick = newSheet
   document.getElementById('back').onclick = function () { history.back() }
   el.head.onclick = modelSheet
+  el.permission.onclick = permissionSheet
+  el.holdTalk.onpointerdown = beginHold
+  el.holdTalk.onpointermove = function (event) { if (!holdGesture || event.pointerId !== holdGesture.pointerId) return; holdGesture.cancelled = holdGesture.startY - event.clientY > 60; syncHoldUi() }
+  el.holdTalk.onpointerup = function (event) { if (holdGesture && event.pointerId === holdGesture.pointerId) releaseHold(false) }
+  el.holdTalk.onpointercancel = el.holdTalk.onlostpointercapture = function (event) { if (holdGesture && event.pointerId === holdGesture.pointerId) releaseHold(true) }
+  el.holdTalk.oncontextmenu = function (event) { event.preventDefault() }
+  el.holdTalk.onkeydown = function (event) { if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) beginHold({ pointerId: 'keyboard', preventDefault: function () { event.preventDefault() } }) }
+  el.holdTalk.onkeyup = function (event) { if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); releaseHold(false) } }
+  el.voiceKeyboard.onclick = leaveHoldMode
+  el.mic.onclick = voiceMenu
+  el.voiceFinish.onclick = finishVoice
+  el.voiceEnd.onclick = function () { stopVoice('已退出语音') }
+  el.callInterrupt.onclick = function () { if (voice && voice.failedSave) finishVoice(); else if (voice) continueVoice(voice) }
+  el.callHangup.onclick = function () { stopVoice('通话已结束') }
+  el.callMute.onclick = function () { var v = voice; if (!v || v.mode !== 'call') return; v.muted = !v.muted; v.submitGeneration = (v.submitGeneration || 0) + 1; v.detectGeneration = (v.detectGeneration || 0) + 1; if (v.stream) v.stream.getTracks().forEach(function (t) { t.enabled = !v.muted }); v.barge = []; v.bargeCount = 0; v.detectPositive = 0; el.callMute.textContent = v.muted ? '取消静音' : '静音'; el.callMute.setAttribute('aria-pressed', String(v.muted)); voiceHint(v, v.muted ? '麦克风已静音' : '通话中 · 正在听') }
+  el.voiceRetryReplies.onclick = function () { Promise.all(Array.from(pendingVoiceReplies.values()).filter(function (entry) { return entry.failed }).map(persistVoiceReply)).then(function () { toast('回复语音已保存') }, function () { toast('仍未保存，请保持页面并稍后重试') }) }
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') { stopVoice(); stopVoicePreview() } })
+  window.addEventListener('pagehide', function () { stopVoice(); stopVoicePreview() })
   document.getElementById('more').onclick = moreSheet
   el.sheetWrap.firstElementChild.onclick = function () { closeOverlay() }
   el.viewer.onclick = function () { closeOverlay() }
@@ -1880,6 +2793,8 @@
   el.fvBody.addEventListener('click', function (e) {
     var en = fv[fv.length - 1], b
     if (!en) return
+    if ((b = e.target.closest('[data-voice-play]'))) { if ((voiceClickSuppressed.get(b.dataset.voiceMenu) || 0) > Date.now()) { if (e.preventDefault) e.preventDefault(); return } playVoiceBubble(b); return }
+    if ((b = e.target.closest('[data-video-download]'))) { downloadVideo(b); return }
     if ((b = e.target.closest('[data-video-fullscreen]'))) { fullscreenVideo(b); return }
     if ((b = e.target.closest('[data-video-retry]'))) { preparePreview(b.closest('[data-video-box]').querySelector('video')); return }
     if ((b = e.target.closest('[data-video-quality]'))) { switchVideo(b); return }
@@ -1924,14 +2839,30 @@
   // message/video nodes. Capture is needed because toggle does not bubble.
   el.msgs.addEventListener('toggle', function (e) {
     var d = e.target, c = S.chats.get(S.cur)
-    if (!c || d.tagName !== 'DETAILS' || d.dataset.resultDetails == null) return
+    if (!c || d.tagName !== 'DETAILS') return
+    if (d.dataset.voiceTranscript != null) { if (!c.voiceTextOpen) c.voiceTextOpen = new Set(); if (d.open) c.voiceTextOpen.add(d.dataset.voiceTranscript); else c.voiceTextOpen.delete(d.dataset.voiceTranscript); return }
+    if (d.dataset.voiceUnmatched != null) { c.voiceUnmatchedOpen = d.open; return }
+    if (d.dataset.resultDetails == null) return
+    if (d.previousElementSibling && d.previousElementSibling.classList.contains('result-excerpt')) d.previousElementSibling.hidden = d.open
     if (!c.resultOpen) c.resultOpen = new Set()
     var key = +d.dataset.resultDetails
     if (d.open) c.resultOpen.add(key); else c.resultOpen.delete(key)
   }, true)
+  el.scroller.addEventListener('pointerdown', function (event) {
+    var button = event.target.closest('[data-voice-menu]'); if (!button || (event.button != null && event.button !== 0)) return
+    cancelVoicePress()
+    var press = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, sid: S.cur, button: button }
+    voicePress = press; press.timer = setTimeout(function () { if (voicePress === press && S.cur === press.sid && button.isConnected !== false) openVoiceMessageMenu(button) }, 450)
+  })
+  el.scroller.addEventListener('pointermove', function (event) { if (voicePress && event.pointerId === voicePress.pointerId && Math.hypot(event.clientX - voicePress.x, event.clientY - voicePress.y) > 12) cancelVoicePress() })
+  ;['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function (type) { el.scroller.addEventListener(type, cancelVoicePress) })
+  el.scroller.addEventListener('scroll', function () { cancelVoicePress(); stopVoiceQueue() }, { passive: true })
+  el.scroller.addEventListener('contextmenu', function (event) { var button = event.target.closest('[data-voice-menu]'); if (button) { event.preventDefault(); openVoiceMessageMenu(button) } })
   el.scroller.addEventListener('click', function (e) {
     var c = S.chats.get(S.cur), b
     if (!c) return
+    if ((b = e.target.closest('[data-voice-play]'))) { if ((voiceClickSuppressed.get(b.dataset.voiceMenu) || 0) > Date.now()) { if (e.preventDefault) e.preventDefault(); return } playVoiceBubble(b); return }
+    if ((b = e.target.closest('[data-video-download]'))) { downloadVideo(b); return }
     if ((b = e.target.closest('[data-video-fullscreen]'))) { fullscreenVideo(b); return }
     if ((b = e.target.closest('[data-video-retry]'))) { preparePreview(b.closest('[data-video-box]').querySelector('video')); return }
     if ((b = e.target.closest('[data-video-quality]'))) { switchVideo(b); return }
@@ -1969,6 +2900,7 @@
     if ((b = e.target.closest('[data-copy]'))) { copy(b.closest('pre').querySelector('code').textContent); return }
     if ((b = e.target.closest('[data-copymsg]'))) { c.items.forEach(function (it) { if (it.seq === +b.dataset.copymsg) copy(it.text) }); return }
     if ((b = e.target.closest('[data-older]'))) { loadOlder(c); return }
+    if ((b = e.target.closest('[data-call-locate]'))) { var callStart = el.msgs.querySelector('[data-call-id="' + b.dataset.callLocate + '"]'); if (callStart) callStart.scrollIntoView({ behavior: 'smooth', block: 'center' }); return }
     if ((b = e.target.closest('[data-retry]'))) { loadHistory(c); return }
     if ((b = e.target.closest('img[data-view]'))) { view(b.src); return }
   })
@@ -1979,6 +2911,16 @@
   el.dock.addEventListener('click', function (e) {
     var c = S.chats.get(S.cur), b
     if (!c) return
+    var asyncCard = e.target.closest('[data-async-question]')
+    if (asyncCard) {
+      var asyncQuestion = (c.asyncQuestions || []).find(function (item) { return item.id === asyncCard.dataset.asyncQuestion }); if (!asyncQuestion) return
+      if (e.target.closest('[data-async-refresh]')) { loadAsyncQuestions(c.id); return }
+      var asyncValue = asyncDraft(c.id, asyncQuestion.id)
+      if (asyncValue.delivery || asyncQuestion.delivery === 'unknown' || asyncQuestion.delivery === 'pending') return
+      if ((b = e.target.closest('[data-async-option]'))) { var option = (asyncQuestion.options || [])[+b.dataset.asyncOption]; if (option != null) { asyncValue.text = option; saveAsyncDrafts(); drawDock() } return }
+      if (e.target.closest('[data-async-submit]')) submitAsyncAnswer(c, asyncQuestion)
+      return
+    }
     if ((b = e.target.closest('[data-allow],[data-deny],[data-remember]'))) {
       var id = b.dataset.allow || b.dataset.deny || b.dataset.remember, a = S.asks.get(id)
       if (!a) return
@@ -2045,6 +2987,8 @@
     if (e.target.closest('[data-todo]')) { c.todoOpen = !c.todoOpen; drawDock() }
   })
   el.dock.addEventListener('input', function (e) {
+    var aq = e.target.closest('[data-async-question]'), ai = e.target.closest('[data-async-input]')
+    if (aq && ai && S.cur) { var draft = asyncDraft(S.cur, aq.dataset.asyncQuestion); if (!draft.delivery) { draft.text = ai.value; saveAsyncDrafts() } return }
     var inp = e.target.closest('[data-qi]'), card = e.target.closest('[data-q]')
     if (!inp || !card) return
     var q = S.qs.get(card.dataset.q)
@@ -2052,24 +2996,35 @@
   })
   el.dock.addEventListener('focusout', function () { setTimeout(function () { if (dockDirty && !el.dock.contains(document.activeElement)) drawDock() }, 0) })
 
-  el.input.addEventListener('input', function () { autosize(); syncSend() })
+  el.inputSuggestion.onclick = acceptSuggestion
+  el.input.addEventListener('compositionstart', function () { suggestion.composing = true; hideSuggestion() })
+  el.input.addEventListener('compositionend', function () { suggestion.composing = false; syncSuggestion() })
+  el.input.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') { if (suggestion.key) suggestion.seen.add(suggestion.key); hideSuggestion() }
+    if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing && !suggestion.composing && document.activeElement === el.input && acceptSuggestion()) event.preventDefault()
+  })
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState !== 'visible') hideSuggestion(); else syncSuggestion() })
+  el.input.addEventListener('input', function () { hideSuggestion(); autosize(); syncSend() })
   el.send.onclick = function () { if (el.send.classList.contains('stop')) stop(); else send() }
   el.attach.onclick = function () { el.file.click() }
   el.quick.onclick = quickSheet
   el.file.onchange = function () {
+    var sid = S.cur, generation = attachmentGeneration, attachments = S.att
     var files = Array.prototype.slice.call(el.file.files || [], 0, Math.max(0, 6 - S.att.length))
     el.file.value = ''
     Promise.all(files.map(function (f) { return prepImage(f).catch(function () { toast('有图片读取失败', 'err'); return null }) })).then(function (list) {
-      list.forEach(function (a) { if (a) S.att.push(a) })
+      list.forEach(function (a) { if (!a) return; if (sid !== S.cur || generation !== attachmentGeneration || attachments !== S.att || S.att.length >= 6) { URL.revokeObjectURL(a.url); return } S.att.push(a) })
       drawThumbs(); syncSend()
     })
   }
   el.thumbs.addEventListener('click', function (e) {
     var b = e.target.closest('[data-rm]')
     if (!b) return
-    S.att.splice(+b.dataset.rm, 1)
+    var removed = S.att.splice(+b.dataset.rm, 1); removed.forEach(function (item) { URL.revokeObjectURL(item.url) })
     drawThumbs(); syncSend()
   })
+
+  setInterval(function () { if (document.visibilityState === 'visible' && S.cur && S.status === 'online') loadAsyncQuestions(S.cur) }, 5000)
 
   setInterval(function () {
     checkUpdates()
@@ -2152,6 +3107,7 @@
     return updateFlight
   }
   window.dshToast = function (msg, kind) { toast(msg, kind) }
+  window.dshStopVoice = function () { stopVoice() }
 
   // "Share to DSH" from another app: pick the conversation, then review in the composer.
   function b64Blob(b64, type) {
@@ -2200,7 +3156,7 @@
     else if (S.cur !== id) openChat(id)
   }
   // /m/?debug exposes the frame entry point for UI checks with synthetic frames.
-  if (/[?&]debug\b/.test(location.search)) window.__dsh = { S: S, onFrame: onFrame }
+  if (/[?&]debug\b/.test(location.search)) window.__dsh = { syncSuggestion: syncSuggestion, acceptSuggestion: acceptSuggestion, S: S, onFrame: onFrame, loadVoiceHistory: loadVoiceHistory, renderMsgs: renderMsgs, loadAsyncQuestions: loadAsyncQuestions, startVoice: startVoice, getVoiceTiming: function () { return voice && voice.callTiming ? Object.assign({}, voice.callTiming) : null } }
   var deep = decodeURIComponent((location.hash || '').slice(1))
   history.replaceState({ v: 'home' }, '', location.pathname)
   var cached = store.get('boot', null)
@@ -2210,3 +3166,7 @@
   checkUpdates()
   connect()
 })()
+
+
+
+

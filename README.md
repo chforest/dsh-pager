@@ -1,11 +1,11 @@
 # dsh-pager
 
-**DeepSeek Harness 的"寻呼机"**：一个 DSH 插件，加一个约 40 KB 的安卓 App；iPhone 把网页添加到主屏幕即可。
+**DeepSeek Harness 的"寻呼机"**：一个 DSH 插件，加一个约 53 KB 的安卓 App；iPhone 把网页添加到主屏幕即可。
 人不在电脑前，也能看进度、看改了哪些文件、发指令，并在通知栏里直接批准或拒绝。**默认仅同步 DSH 自己的项目和对话**；电脑上的 Claude Code / Codex 接入为显式开启的可选功能（见 [docs/claude-code-codex.md](docs/claude-code-codex.md)）。
 
 > 非官方社区项目，与 DeepSeek 没有关联。· [English](#english)
 
-`MIT` · `Android 10+` · `iOS 16.4+（网页版）` · `DeepSeek Harness 0.1.x` · `Node.js 22+` · `dsh-plugin`
+`MIT` · `Android 10+` · `iOS 16.4+（网页版）` · `DeepSeek Harness 0.1.1-rc.2（已验版本）` · `Node.js 22+` · `dsh-plugin`
 
 <table>
 <tr>
@@ -28,6 +28,14 @@
 
 ## 界面更新
 
+**1.6.0 完整发行版**：安卓录音与视频下载、三种语音交互、桌面文件与截图/OCR/翻译、异步提问、原聊天自动任务与恢复、中文社区市场、上下文灰字建议。
+
+先按[完整扩展安装说明](docs/extensions.md)注册各模块；语音与社区市场需分别安装随仓库提供的固定版本扩展。APK 不捆绑电脑服务、语音模型、第三方播放器或私人配置。详见[更新记录](CHANGELOG.md)。
+
+首页“插件”进入[手机、平板插件市场](docs/plugin-market-mobile.md)：中文分类搜索、星标/下载排序、详情和电脑端安装回执。
+
+手机和平板现可在输入框下方切换“只读 / 工作区写入 / 完全访问”；电脑本机界面新增原生文件夹选择并添加工作区入口。用法及维护说明见 [会话权限与电脑文件夹](docs/permissions-and-folders.md)。
+
 有新版界面时，首页顶部会显示「界面有更新，点这里更新」。点击一次更新这台设备的整套界面，所有对话都生效；手机、平板分别更新一次。
 
 旧界面首次升级：在首页点击「已连接」→「更新界面并重连」。之后可以使用首页的新版提醒。界面只在可见、联网时检查更新，不会自动刷新或打断播放；更新会保存文字草稿，待发送图片和进行中的消息操作需要先处理。
@@ -46,13 +54,13 @@ dsh-pager 分别对应三件事：一套为手机重写的界面，在电脑上�
 ## 它是什么
 
 ```
-安卓 · dsh-pager App（41 KB：WebView 外壳 + 常驻通知服务）
+安卓 · dsh-pager App（约53 KB：WebView 外壳 + 常驻通知服务）
 iPhone · 同一个界面，Safari "添加到主屏幕"（网页推送做锁屏提醒）
    │   你已有的远程通道：国内云服务器上的登录网关，或异地组网（与翻墙无关）
    ▼
 DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
    └─ 插件 dsh-pager，挂在 /m
-        ├─ /m/                 手机界面（约 30 KB，放在电脑上：改完手机下拉刷新即生效）
+        ├─ /m/                 手机界面（由电脑提供，更新后在设备端刷新）
         ├─ /m/api/boot         工作区 + 会话列表（约 2 KB）
         ├─ /m/api/history      在电脑上折叠后的历史（4 MB 级 → 20–30 KB）
         ├─ /m/api/events       实时帧（流式文字每 90 ms 合并一次）
@@ -66,7 +74,9 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
         └─ /m/api/rpc|respond  发消息 / 停止 / 换模型 / 审批 / 回答提问（白名单）
 ```
 
-## 真机实测
+## 历史真机实测（旧版本）
+
+1.6.0 已通过公开包签名兼容性与主机回归检查；本轮没有连接实体手机/平板，不把旧版体验当作新版完整设备验收。
 
 实测环境：Redmi（HyperOS / Android 16）与华为平板（HarmonyOS 4.2），经公网链路连回家里电脑（2026-09-21 至 09-22）。
 
@@ -110,14 +120,14 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 - **快捷指令**："跑测试""总结改动"这类常用的话存在电脑上（`~/.dsh-pager/commands.json`），所有手机共用；输入框旁点 ⚡ 选一条就填进去，看一眼再发。
 - **省流量**：插件在电脑上把原始事件折叠成"用户消息 / 回复 / 每个工具一行 / 回合结束"，再压缩下发。
 - **界面热更新**：界面跑在电脑上，App 只是外壳。改完界面，手机下拉刷新就生效，不用重装。
-- **不增加暴露面**：挂在 DSH 自己的 web 服务上，不开新端口，DSH 仍只绑 127.0.0.1。
+- **受限接口**：手机接口挂在 DSH 自己的 Web 服务上；本机截图使用独立回环端口、Origin校验及随机票据。不会替你把服务绑定到公网。
   - 接口沿用 DSH 同款信任栅栏（Host / Origin / 跨站检查）。
-  - RPC 只放行 9 个方法（新建会话、发消息、停止、查/选模型、改名、搜索、排队、归档），设置、密钥这类接口一个不开。
+  - RPC 使用显式白名单；权限、文件夹、计划与提问使用专门校验接口，不提供任意设置或密钥写入入口。
 - **不绑定通道**：走你已有的登录网关或异地组网，不内置第三方隧道或中继。流量不经过别人的服务器，用国内云服务器就能全程国内直连（作者自用的就是这样）。
-- **只用 DSH 公开的线协议**（`POST /api/<方法>`、`/api/events.*`），不依赖 DSH 内部模块，DSH 升级时不容易坏。
+- **基础界面复用 DSH 线协议**；新增桌面、模型及任务扩展使用宿主 SDK/插槽。DSH 升级须重新检查兼容性。
 - **小而可审计**：
-  - 服务端约 2,500 行原生 JS，零 npm 依赖（网页推送的加密和签名也是用 Node 自带的 crypto 写的）；界面是原生 JS/CSS，无框架。
-  - App 约 1,300 行 Java、无 Gradle，一条命令即可复现构建。
+  - 手机界面为原生 JS/CSS；基础 HTTP 服务使用 Node 内置模块，扩展复用 DSH SDK。可选语音和市场另有第三方依赖及许可。
+  - App 使用 Java、无 Gradle，构建步骤和签名要求见 Android 文档。
 
 ## 与同类项目对比
 
@@ -133,7 +143,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 | [dsh-remote-web-gateway](https://github.com/summer1238/dsh-remote-web-gateway) | 网关插件 | 网页 | Cloudflare Quick Tunnel | GitHub 登录 + 一次性配对 + 设备撤销 | 未提及 | 无 App |
 | [DSH Mobile (sorsama)](https://github.com/sorsama/deepseek-harness-mobile) | 原生 Compose App + dsh-relay 插件 | 原生，功能对齐 GUI | 局域网 / relay / 自有反代 | relay 配对 + 固定公钥 | 前台服务：回合完成、目标完成或受阻、审阅或提问等待 | 14.5 MB |
 | [dsh-remote-mobile](https://github.com/IceApriler/dsh-remote-mobile) | 安全网关插件 + 移动端样式 | 桌面界面 + 移动端 CSS | 局域网 / Tailscale | 扫码 + RSA + 防爆破 | 未提及 | 无 App |
-| **dsh-pager（本项目）** | 插件（挂 /m）+ 安卓 WebView 外壳 + iPhone 网页 App；也接 Claude Code / Codex | 为手机重写的界面，服务端先折叠；带结果查看器 | 任意现有通道，不内置隧道 | 交给你的登录网关或异地组网 | 安卓：常驻前台服务 + 专用低频流，通知栏直接允许/拒绝，断线补发；iPhone：网页推送 | **41 KB** |
+| **dsh-pager（本项目）** | 插件（挂 /m）+ 安卓 WebView 外壳 + iPhone 网页 App；也接 Claude Code / Codex | 为手机重写的界面，服务端先折叠；带结果查看器 | 任意现有通道，不内置隧道 | 交给你的登录网关或异地组网 | 安卓：常驻前台服务 + 专用低频流，通知栏直接允许/拒绝，断线补发；iPhone：网页推送 | **约53 KB（1.6.0）** |
 
 **我们的定位**：不是把桌面界面搬到手机上，而是做一个"寻呼机"。你锁屏时它替你盯着，需要你时叫你，点开就能处理。所以我们优先保证三件事：体积最小、流量最省、后台提醒最可靠。认证和隧道交给你已有的、更专业的工具。
 
@@ -147,7 +157,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 
 ### 1. 在电脑上装插件
 
-要求：DeepSeek Harness 0.1.x（在 0.1.1-rc.2 上验证），Node.js 22 及以上。
+要求：DeepSeek Harness 0.1.1-rc.2（已验版本）（在 0.1.1-rc.2 上验证），Node.js 22 及以上。
 
 ```bash
 git clone https://github.com/wg5759/dsh-pager.git
@@ -175,7 +185,7 @@ ln -s /path/to/dsh-pager/plugin ~/.dsh/profiles/web/node_modules/dsh-pager
 
 重启 DSH web，然后在电脑浏览器打开 `http://127.0.0.1:3080/m/`，能看到会话列表就说明插件装好了。
 
-想卸载，删掉这几行 patch 再重启即可，DSH 会完全恢复原样；桌面界面 `/` 始终不受影响。
+想卸载，删掉这几行 patch 再重启即可，DSH 会完全恢复原样；可选桌面入口随相应扩展卸载；不会将电脑界面替换成手机界面。
 
 ### 2. 让手机能访问到
 
@@ -223,7 +233,7 @@ node tools/install-hooks.mjs codex      # Codex（装好后在 Codex 里输入 /
 ## 安全须知
 
 - **能在手机上发指令，就等于能让电脑执行命令**（受 DSH 自身审批策略约束）。所以远程通道必须有你信得过的认证：带登录的网关，或者只有你自己设备的异地组网。
-- dsh-pager 不开新端口，也不改变 DSH 的绑定地址，`/m/api/*` 沿用和 DSH 相同的 Host / Origin / 跨站检查。`trustedHosts` 里写错的条目会让插件在加载时直接报错，而不是悄悄放行。
+- 手机接口不另开监听端口，也不改变 DSH 的绑定地址；显式调用本机截图时使用带随机票据的独立回环服务，`/m/api/*` 沿用和 DSH 相同的 Host / Origin / 跨站检查。`trustedHosts` 里写错的条目会让插件在加载时直接报错，而不是悄悄放行。
 - App 本地只存服务器地址、网关 Cookie（如果有）和提醒序号；日志只记连接状态和帧类型，不记内容和凭据（`adb logcat -s DSHNotify`）。
 - 没有统计、没有第三方 SDK、不依赖 Google 服务；公开版 APK 关闭了 WebView 远程调试（1.2.1 起）。
 - 结果查看器只读，且只能读该对话所在工作区里的文件（符号链接、目录联接指到外面的也会被拦住），并隐藏密钥类文件。它不会识别普通文档里写的密码。
@@ -234,7 +244,7 @@ node tools/install-hooks.mjs codex      # Codex（装好后在 Codex 里输入 /
 ## 开发
 
 ```bash
-cd plugin && npm test                 # 插件单测（66 项，含 RFC 8291 官方测试向量）
+cd plugin && npm test                 # 手机/HTTP回归，含RFC 8291测试向量
 node --test tools/*.test.mjs          # 转发器、钩子安装器单测
 node tools/make-icons.mjs             # 重新生成网页 App 图标
 node plugin/dev.mjs                   # 独立开发服务器 http://127.0.0.1:3090/m/，直连本机 DSH，改服务端代码不用重启 DSH
@@ -270,7 +280,7 @@ docs/       远程访问 · Android · iPhone · Claude Code / Codex · DSH 协�
 ## English
 
 **dsh-pager** is a pager for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). It has two parts:
-- a 41 KB Android app;
+- a ~53 KB Android app (1.6.0);
 - a DSH plugin that serves a phone-first UI and API at `/m` on DSH's own web server.
 
 Together they let you follow sessions, send prompts, and approve or reject tool calls from the notification shade while you are away from your PC. This is an unofficial community project, not affiliated with DeepSeek.
@@ -285,8 +295,8 @@ Together they let you follow sessions, send prompts, and approve or reject tool 
   - `/m/api/*` applies DSH's own Host/Origin fence, plus a 9-method RPC allow-list.
   - Remote access is left to your own authenticating gateway or private network (WireGuard, EasyTier, Tailscale…); see [docs/remote-access.md](docs/remote-access.md). DSH has no login, so never expose it publicly without one.
 - **Small and auditable.**
-  - Zero npm dependencies.
-  - About 2,500 lines of server JS and a vanilla JS UI that hot-reloads on the phone.
+  - Core mobile HTTP code uses Node built-ins; optional extensions have documented dependencies.
+  - A vanilla JS mobile UI that hot-reloads on the phone.
   - A 1,300-line Java shell built without Gradle, with in-app updates served from your own PC.
 - **DSH-only by default.** Only DSH projects and sessions are synced. Claude Code and Codex are an optional, explicit opt-in; see [docs/claude-code-codex.md](docs/claude-code-codex.md).
 - **Persistent video previews.** Every DSH workspace can deliver local video paths as inline players. With FFmpeg, large videos get cached H.264/AAC previews (1280 maximum edge, 30 fps, capped bitrate), with an original-quality switch. Both support HTTP Range seeking, and completed previews survive restarts.

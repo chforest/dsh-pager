@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>DSH 自动任务</title><link rel="stylesheet" href="/m/tasks.css"><link rel="stylesheet" href="/m/folder-picker.css"></head>
+<body><main id="tasksApp">
+  <header><div><a id="back" href="/m/">‹ 返回聊天</a><h1>自动任务</h1></div><button id="newTask" class="primary">新建任务</button></header>
+  <p class="intro">按时间执行，或围绕一个目标持续推进。DSH 运行时任务才会执行；需要你确认的操作仍会在聊天中询问。</p>
+  <div class="toolbar"><label><input id="showArchived" type="checkbox"> 显示已归档</label><button id="refresh">刷新</button></div>
+  <div id="notice" role="status" hidden></div><button id="acknowledge" hidden>重试确认上次操作</button>
+  <section id="taskList" aria-label="任务列表"><p class="empty">正在读取任务…</p></section>
+  <dialog id="editor"><form id="taskForm">
+    <div class="form-heading"><h2 id="formTitle">新建任务</h2><button id="cancel" type="button" aria-label="关闭">×</button></div>
+    <label>任务名称<input id="title" maxlength="100" placeholder="例如：整理本周视频素材"></label>
+    <label>目标内容<textarea id="objective" rows="4" maxlength="12000" required placeholder="说明要完成什么，以及范围和交付要求"></textarea></label>
+    <label>工作区<select id="workspace" required><option value="">请选择工作区</option></select></label>
+    <button id="browseWorkspace" type="button">浏览电脑文件夹</button>
+    <label>执行方式<select id="execution"><option value="manual">立即开始</option><option value="once">指定时间</option><option value="delay">延时执行</option><option value="interval">每隔一段时间</option><option value="daily">每天</option><option value="weekly">每周选日</option></select></label>
+    <div id="onceFields" hidden><label>执行时间（北京时间）<input id="at" type="datetime-local"></label></div>
+    <div id="minutesFields" hidden><label id="minutesLabel">间隔分钟<input id="minutes" type="number" min="5" step="1" value="60"></label></div>
+    <div id="dailyFields" hidden><label>执行时间（北京时间）<input id="time" type="time" value="09:00"></label></div>
+    <fieldset id="weekFields" hidden><legend>选择星期</legend><div id="weekDays" class="weekdays"></div></fieldset>
+    <label class="switch"><input id="continuous" type="checkbox"> 自动拆解并持续推进</label><p class="help">开启后在目标范围内继续处理；遇到必须确认的问题仍会等你。</p>
+    <details><summary>高级设置</summary><label>执行权限<select id="permission"><option value="">使用默认权限</option></select></label><label>最多推进轮数<input id="rounds" type="number" min="1" max="100" value="8"></label></details>
+    <p id="formError" role="alert" hidden></p><button id="saveTask" class="primary" type="submit">创建并开始</button>
+  </form></dialog>
+</main><script src="/m/folder-picker.js"></script><script src="/m/tasks.js"></script></body></html>

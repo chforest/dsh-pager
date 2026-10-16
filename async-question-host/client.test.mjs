@@ -1,0 +1,20 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const source=fs.readFileSync(new URL('./client.js',import.meta.url),'utf8');
+function load(items=[]){let api;const React={createElement:(tag,props,...children)=>({tag,props,children}),useState:v=>[Array.isArray(v)?items:v,()=>{}],useRef:v=>({current:v}),useEffect:()=>{}};const c={window:{__ModuleLoader__:{load:m=>{api=m.factory(()=>React)}}},Map,Date,AbortSignal,crypto:globalThis.crypto,fetch:()=>{throw Error('unexpected network')}};vm.runInNewContext(source,c);return api;}
+
+test('confirmed answers remove the whole dock while unresolved records remain and source history is intact',()=>{
+ const items=[{id:'a',status:'answered',delivery:'accepted'},{id:'b',status:'answered',delivery:'not-needed'}];const original=JSON.stringify(items),api=load(items);
+ assert.equal(api.AsyncQuestionDock({sessionId:'s'}),null);assert.equal(JSON.stringify(items),original);
+ const mixed=items.concat({id:'c',status:'deferred',question:'still waiting'},{id:'d',status:'answered',delivery:'unknown',question:'unconfirmed'}),other=load(mixed);
+ assert.deepEqual(Array.from(other.pendingItems('s',mixed),x=>x.id),['c','d']);assert.ok(other.AsyncQuestionDock({sessionId:'s'}));
+ other.draftFor('s','c').state='sent';assert.deepEqual(Array.from(other.pendingItems('s',mixed),x=>x.id),['d']);
+});
+test('only additive native dock registered, session identity comes from native props',()=>{const api=load();const registrations=[];api.apply({slots:{inject:(name,fn)=>{assert.equal(name,'conversation.input.dock');fn()},register:(spec,component)=>registrations.push({spec,component})}});assert.equal(registrations.length,1);assert.equal(registrations[0].spec.id,'async-preference-questions');assert.match(source,/function AsyncQuestionDock\(\{ sessionId \}\)/);assert.doesNotMatch(source,/question\/resolved|approval\/|location.hash/)});
+test('drafts survive polling and are isolated by session and question',()=>{const api=load();api.draftFor('s','q').text='original';api.observeAnswer('s',{id:'q',status:'deferred'});assert.equal(api.draftFor('s','q').text,'original');assert.equal(api.draftFor('other','q').text,'')});
+test('timeout never produces a user answer',()=>{const api=load();assert.match(api.questionStatus({status:'deferred'},Date.now()),/仍可补答/);assert.match(api.questionStatus({status:'waiting',deadline:'2000-01-01'},Date.now()),/未替你选择/);assert.equal(api.draftFor('s','q').state,'idle')});
+test('explicit submit sends one stable answer receipt and prevents double click',async()=>{const api=load();api.draftFor('s','q').text='选择A';let count=0,resolve,body;const fetcher=async(_,opts)=>{count++;body=JSON.parse(opts.body);await new Promise(r=>resolve=r);return{ok:true,json:async()=>({ok:true,value:{id:'q',status:'answered',delivery:'accepted'}})}};const one=api.submitAnswer('s',{id:'q',status:'deferred'},()=>{},fetcher);await api.submitAnswer('s',{id:'q',status:'deferred'},()=>{},fetcher);resolve();await one;assert.equal(count,1);assert.equal(body.s,'s');assert.equal(body.answer,'选择A');assert.match(body.answerId,/^[0-9a-f-]{36}$/);assert.equal(api.draftFor('s','q').state,'sent')});
+test('unknown network result is retained and never replayed; server receipt can reconcile',async()=>{const api=load();api.draftFor('s','q').text='B';let count=0;const fail=async()=>{count++;throw Error('offline')};await api.submitAnswer('s',{id:'q'},()=>{},fail);await api.submitAnswer('s',{id:'q'},()=>{},fail);assert.equal(count,1);assert.equal(api.draftFor('s','q').state,'unknown');api.observeAnswer('s',{id:'q',status:'answered',delivery:'accepted'});assert.equal(api.draftFor('s','q').state,'sent')});
+test('structured stored answer displays text and late acceptance promises only queued handling',()=>{const api=load();assert.equal(api.answerText({id:'answer-1',text:'浅色主题',at:'2026-10-13'},'old draft'),'浅色主题');assert.equal(api.answerText({id:'x'},''),'已记录');assert.match(api.questionStatus({status:'answered',delivery:'accepted'},0),/排入原会话后续处理/);assert.match(api.questionStatus({status:'answered',delivery:'pending'},0),/待确认/)});
