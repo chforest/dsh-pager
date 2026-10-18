@@ -17,16 +17,18 @@ try {
   $start.FileName=$output;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
   $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
   $start.StandardOutputEncoding=New-Object System.Text.UTF8Encoding($false)
+  $start.StandardErrorEncoding=New-Object System.Text.UTF8Encoding($false)
   $process=New-Object System.Diagnostics.Process
   $process.StartInfo=$start
   try {
     [void]$process.Start()
-    $process.StandardInput.Write((@{action='open';path=$missing}|ConvertTo-Json -Compress));$process.StandardInput.Close()
+    $request=[Text.Encoding]::UTF8.GetBytes((@{action='open';path=$missing}|ConvertTo-Json -Compress))
+    $process.StandardInput.BaseStream.Write($request,0,$request.Length);$process.StandardInput.BaseStream.Flush();$process.StandardInput.Close()
     if(-not $process.WaitForExit(10000)){$process.Kill();throw 'Negative fixture timed out'}
     $reply=$process.StandardOutput.ReadToEnd()|ConvertFrom-Json
     $diagnostic=$process.StandardError.ReadToEnd()
     if($process.ExitCode -ne 1 -or $reply.ok -ne $false -or $reply.error -ne 'FILE_ACTION_FAILED'){throw 'Expected structured failure and exit 1'}
-    if($diagnostic -notmatch '^FILE_ACTION_ERROR type=FileNotFoundException hresult=-?\d+') {throw 'Missing safe exception diagnostic'}
+    if($diagnostic -notmatch '^FILE_ACTION_ERROR type=FileNotFoundException hresult=-?\d+') {throw ('Unexpected safe exception diagnostic: '+$diagnostic.Trim())}
     Write-Output 'PASS: GUI subsystem compiled; no-console nonexistent-file execution returned JSON failure and exit 1; no dialog or real file action invoked'
   } finally { $process.Dispose() }
 } finally { if(Test-Path -LiteralPath $output){Remove-Item -LiteralPath $output} }
