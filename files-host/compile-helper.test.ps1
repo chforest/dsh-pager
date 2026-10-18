@@ -23,7 +23,9 @@ try {
   try {
     [void]$process.Start()
     $request=[Text.Encoding]::UTF8.GetBytes((@{action='open';path=$missing}|ConvertTo-Json -Compress))
-    $process.StandardInput.BaseStream.Write($request,0,$request.Length);$process.StandardInput.BaseStream.Flush();$process.StandardInput.Close()
+    # Do not close the unused text writer: on some Windows locales it flushes
+    # a UTF-8 preamble after the JSON bytes, making the request invalid.
+    $process.StandardInput.BaseStream.Write($request,0,$request.Length);$process.StandardInput.BaseStream.Flush();$process.StandardInput.BaseStream.Close()
     if(-not $process.WaitForExit(10000)){$process.Kill();throw 'Negative fixture timed out'}
     $reply=$process.StandardOutput.ReadToEnd()|ConvertFrom-Json
     $diagnostic=$process.StandardError.ReadToEnd()
