@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
 import { createNativeAdapter, createTasksHandler, goalObjective } from './index.js'
+test('standalone task route denies non-owner before reading catalog or mutating',async()=>{let status,body;const handler=createTasksHandler({list:()=>{throw Error('must not read')},mutate:()=>{throw Error('must not write')}},{catalog:()=>{throw Error('must not read')}},[],()=>401);await handler({method:'GET',headers:{},url:'/m/api/tasks'},{writeHead:s=>status=s,end:x=>body=JSON.parse(x),headersSent:false});assert.equal(status,401);assert.equal(body.ok,false)});
 
 test('native adapter prepares owned session/model/permissions/durability before native goal; pause and bounded resume use CAS', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'native-task-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }))

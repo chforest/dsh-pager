@@ -73,12 +73,30 @@ import { createRemoteFolders } from './remote-folders.js?drive-cache-v2'
 import { createAsyncQuestions } from './async-questions.js?async-v1'
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
+
+/** Version of the DSH host running this plugin (walks up from its entry script), or null. */
+const DSH_VERSION = (() => {
+  try {
+    let dir = path.dirname(fs.realpathSync(process.argv[1] || ''))
+    for (let i = 0; i < 6; i++) {
+      const f = path.join(dir, 'package.json')
+      if (fs.existsSync(f)) {
+        const p = JSON.parse(fs.readFileSync(f, 'utf8'))
+        if (p.name === '@deepseek-ai/dsh' && typeof p.version === 'string') return p.version
+      }
+      const up = path.dirname(dir)
+      if (up === dir) break
+      dir = up
+    }
+  } catch {}
+  return null
+})()
 const WWW = path.join(PLUGIN_DIR, 'www')
 
 /** The only DSH methods a phone may invoke through /m/api/rpc. */
 const RPC_ALLOW = new Set([
   'session.create', 'session.prompt', 'session.cancel', 'session.models', 'session.selectModel',
-  'session.rename', 'session.search', 'session.updateQueue', 'workspace.archiveSession',
+  'session.rename', 'session.search', 'session.updateQueue', 'workspace.archiveSession', 'commands/list',
 ])
 const PERMISSION_PRESETS = new Set(['read-only', 'workspace-write', 'danger-full-access'])
 
@@ -177,7 +195,7 @@ function readJson(req, limit) {
  *   starts one of them; only the demo (demo/fake-dsh.mjs) replaces the real ones.
  * @returns {{ handle: (req, res) => Promise<void>, close: () => void }}
  */
-export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk, externalAgents = false, previewDir, voiceDir, questionDir, remoteFolderOptions, ffmpeg, transcripts = {}, spawnAgent = spawn, pickDirectory = pickDesktopDirectory, captureRegion = captureDesktopRegion, screenshotTranslate, screenshotRecognize, suggestionProvider }) {
+export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk, externalAgents = false, previewDir, voiceDir, questionDir, remoteFolderOptions, ffmpeg, transcripts = {}, spawnAgent = spawn, pickDirectory = pickDesktopDirectory, captureRegion = captureDesktopRegion, screenshotTranslate, screenshotRecognize, suggestionProvider, hostRpc, authorizeRequest, nativeStreams, nativeRespond }) {
   if (typeof externalAgents !== 'boolean') throw new Error('externalAgents must be a boolean')
   // Fail the load loudly, as DSH does, rather than 403 every phone request later.
   const badHost = trustedHosts.find((h) => canonicalTrustedHost(h) === null)
@@ -228,8 +246,9 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
 
   // Always-on watcher behind /m/api/notify. Started shortly after load (DSH may
   // still be binding its port) so notices are buffered even before a phone connects.
-  const hub = new NotifyHub({ wsBase: () => `ws://127.0.0.1:${apiPort()}`, listSessions: () => value('session.list', {}), log })
+  const hub = new NotifyHub({ wsBase: () => `ws://127.0.0.1:${apiPort()}`, listSessions: () => value('session.list', {}), log, nativeStreams })
   const hubTimer = setTimeout(() => hub.start(), 3000)
+  hubTimer.unref?.()
 
   // Installed web apps (iPhone) get the same notices through Web Push.
   const dataDir = pushDir || defaultDir()
@@ -270,6 +289,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     } catch (err) { log(`agents: cannot write hook.json: ${err.message}`) }
   }
   const hookTimer = setTimeout(writeHookConfig, 3000)
+  hookTimer.unref?.()
 
   // Sessions found on disk (before the hooks were installed, or after a restart
   // emptied the hub). Rescanned at most every 15 s; each file refolded only when it changed.
@@ -336,6 +356,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   }
 
   async function dsh(method, payload, timeoutMs = 30000, rpcId = crypto.randomUUID()) {
+    if (hostRpc) { try { return { ok: true, value: await hostRpc(method, payload, timeoutMs, rpcId) } } catch (e) { return { ok: false, error: { code: e.code || "host-error", message: e.message } } } }
     const res = await fetch(`${base()}/api/${method}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -410,7 +431,9 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     const list = await value('session.list', {})
     const session = list.items.find(s => s.sessionId === sessionId && s.origin !== 'subagent')
     if (!session) throw Object.assign(new Error('找不到这个 DSH 对话'), { status: 404 })
-    const selection = session.projections?.values?.permissions
+    const exact = nativeStreams ? await value('session.projections', { sessionId }) : null
+    const rawSelection = exact?.values?.permissions || session.projections?.values?.permissions
+    const selection = nativeStreams && rawSelection ? { ...(await value('permissions/catalog', {})), ...rawSelection } : rawSelection
     if (!selection || !Array.isArray(selection.options)) throw Object.assign(new Error('这个对话暂不支持权限切换'), { status: 409 })
     return selection
   }
@@ -435,7 +458,8 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   }
 
   async function boot() {
-    const [ws, sl] = await Promise.all([value('workspace.list', {}), value('session.list', {})])
+    const timed = (m) => { const t = Date.now(); return value(m, {}).then((v) => v, (e) => { log(`boot ${m} failed after ${Date.now() - t}ms: ${e.message}`); throw e }) }
+    const [ws, sl] = await Promise.all([timed('workspace.list'), timed('session.list')])
     const archived = new Set(ws.archivedSessionIds || [])
     const owner = new Map()
     for (const w of ws.items) for (const id of w.sessionIds) owner.set(id, w.workspaceId)
@@ -459,6 +483,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       workspaces: ws.items.map((w) => ({ id: w.workspaceId, title: w.title, path: w.path })),
       sessions,
       blanks,
+      dshVersion: DSH_VERSION,
     }
   }
 
@@ -607,6 +632,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   }
 
   async function respond(body) {
+    if (nativeRespond) return nativeRespond(body)
     if (typeof body.rpcId !== 'string' || !body.result || typeof body.result.ok !== 'boolean') throw Object.assign(new Error('bad respond body'), { status: 400 })
     const res = await fetch(`${base()}/api/respond`, {
       method: 'POST',
@@ -624,7 +650,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     try {
       if (route === 'suggestions') {
         if (!isPost) return json(req,res,405,{ok:false,error:{message:'POST required'}})
-        const body=await readJson(req,2048),sid=body.sessionId
+        const body=await readJson(req,2048),sid=body.sessionId||body.session
         if(typeof sid!=='string'||!/^session-[a-zA-Z0-9-]{1,160}$/.test(sid))return json(req,res,400,{ok:false,error:{message:'无效会话'}})
         await rootOf(sid)
         if(typeof suggestionProvider!=='function')return json(req,res,200,{ok:true,value:{text:'',revision:''}})
@@ -836,7 +862,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   function events(req, res) {
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no' })
     res.write('retry: 2000\n\n')
-    const b = new Bridge(res, `ws://127.0.0.1:${apiPort()}`, log, () => bridges.delete(b), externalAgents ? agents : null)
+    const b = new Bridge(res, `ws://127.0.0.1:${apiPort()}`, log, () => bridges.delete(b), externalAgents ? agents : null, nativeStreams)
     bridges.add(b)
     req.on('close', () => b.close())
   }
@@ -845,6 +871,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     try {
       const url = new URL(req.url || '/', 'http://local')
       const p = url.pathname
+      if (authorizeRequest) { const admission = await authorizeRequest(req); if (!admission?.ok) return json(req, res, admission?.status || 403, { ok: false, error: { code: 'unauthorized', message: '需要登录已授权的 DSH 账号' } }) }
       if (p === '/m') { res.writeHead(308, { location: '/m/' + url.search }); res.end(); return }
       if (p === '/m/' || p === '/m/index.html') return serveShell(req, res)
       if (p.startsWith('/m/api/')) {
@@ -891,7 +918,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
  * and the fresh mux replays still-pending approvals/questions.
  */
 class Bridge {
-  constructor(res, wsBase, log, onClose, agents) {
+  constructor(res, wsBase, log, onClose, agents, nativeStreams) {
     this.res = res
     this.log = log
     this.onClose = onClose
@@ -902,14 +929,17 @@ class Bridge {
     this.toolSeen = new Map()
     this.turnAt = new Map()
     this.calls = new Map()
-    this.sockets = [
+    // hello first: the phone clears pending approvals/questions on hello, and the
+    // native subscription below replays still-pending ones synchronously.
+    this.send({ t: 'hello', at: Date.now() })
+    this.sockets = nativeStreams ? [] : [
       this.open(`${wsBase}/api/events.mux`, (env) => this.onMux(env)),
       this.open(`${wsBase}/api/events.host`, (env) => this.onHost(env)),
     ]
+    if (nativeStreams) this.nativeDispose = nativeStreams({ onMux: env => this.onMux(env), onHost: env => this.onHost(env), onError: () => this.close() })
     // A data frame, not an SSE comment: EventSource hides comments from script,
     // and the phone's stall watchdog needs to see the heartbeat.
     this.ping = setInterval(() => this.send({ t: 'p' }), 15000)
-    this.send({ t: 'hello', at: Date.now() })
     // Claude Code / Codex: their approvals use the same ask frames; anything else just says "refetch".
     if (agents) {
       const askFrame = (a) => ({ t: 'ask', s: a.s, rpc: a.rpc, id: a.id, tool: a.tool, title: a.what, detail: a.detail, why: a.title, remember: a.remember })
@@ -982,6 +1012,7 @@ class Bridge {
       case 'session/projection':
         if (f.key === 'title' && typeof f.value === 'string') this.send({ t: 'title', s, title: f.value })
         if (f.key === 'permissions') this.send({ t: 'permissions', s, value: f.value })
+        if (f.key === 'todos') this.send({ t: 'todo', s, todos: f.value })
         return
       case 'stream/error': return this.send({ t: 'err', msg: f.error && f.error.message })
     }
@@ -1062,6 +1093,7 @@ class Bridge {
       this.agents.off('change', this.onAgentChange)
       this.agents.off('fail', this.onAgentFail)
     }
+    this.nativeDispose?.()
     for (const ws of this.sockets) { try { ws.close() } catch {} }
     try { this.res.end() } catch {}
     this.onClose()

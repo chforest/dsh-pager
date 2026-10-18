@@ -1,8 +1,19 @@
-import {spawn} from 'node:child_process'
+import {spawn,execFileSync} from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 import {fileURLToPath} from 'node:url'
 const script=fileURLToPath(new URL('./screenshot/RecognizeText.ps1',import.meta.url))
+const macSwift=fileURLToPath(new URL('./screenshot/RecognizeText.swift',import.meta.url))
+const macBin=fileURLToPath(new URL('./screenshot/RecognizeTextMac',import.meta.url))
+const macCacheBin=fileURLToPath(new URL('./.cache/screenshot/RecognizeTextMac',import.meta.url))
 const fail=(code,message)=>Object.assign(new Error(message),{code})
+function ensureMacOcrExecutable(){
+ if(fs.existsSync(macBin))return macBin
+ if(fs.existsSync(macCacheBin))return macCacheBin
+ fs.mkdirSync(path.dirname(macCacheBin),{recursive:true})
+ execFileSync('/usr/bin/swiftc',['-O',macSwift,'-o',macCacheBin],{stdio:'ignore',timeout:60000})
+ return macCacheBin
+}
 // Only remove OCR-inserted whitespace supported by adjacent, same-row Han
 // bounding boxes. Keep original spacing when coordinates/text do not align.
 export function normalizeOcrLine(line){
@@ -37,13 +48,19 @@ export function createScreenshotRecognizer({spawnProcess=spawn,platform=process.
  return async function recognizeScreenshot(image,{signal}={}){
   const input=validate(image)
   if(signal?.aborted)throw fail('ocr-cancelled','已取消文字识别')
-  if(platform!=='win32')throw fail('ocr-unsupported','本地文字识别需要Windows')
+  if(platform!=='win32'&&platform!=='darwin')throw fail('ocr-unsupported','本地文字识别需要Windows')
   return new Promise((resolve,reject)=>{
    let child,timer,done=false,size=0;const chunks=[]
    const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);error?reject(error):resolve(value)}
    const stop=error=>{child?.kill();finish(error)}
    const abort=()=>stop(fail('ocr-cancelled','已取消文字识别'))
-   try{child=spawnProcess(path.join(process.env.SystemRoot||'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',script],{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']})}catch{finish(fail('ocr-start-failed','无法启动本地文字识别'));return}
+   try{
+    if(platform==='darwin'){
+     child=spawnProcess(ensureMacOcrExecutable(),[],{shell:false,stdio:['pipe','pipe','pipe']})
+    }else{
+     child=spawnProcess(path.join(process.env.SystemRoot||'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',script],{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']})
+    }
+   }catch{finish(fail('ocr-start-failed','无法启动本地文字识别'));return}
    timer=setTimeout(()=>stop(fail('ocr-timeout','本地文字识别超时，请缩小截图范围')),timeoutMs)
    signal?.addEventListener('abort',abort,{once:true})
    child.stderr.resume()

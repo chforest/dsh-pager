@@ -689,7 +689,7 @@ test('voice message swipe, pointercancel, lost capture and background cancel wit
     if (action === 'background') { v.page.document.visibilityState = 'hidden'; v.page.dispatchDocument('visibilitychange') }
     await new Promise(r => setTimeout(r, 10))
     assert.equal(v.page.els.get('input').value, '', action)
-    assert.equal(v.page.rpcCalls.length, 0, action)
+    assert.equal(v.page.rpcCalls.filter(call => call.method !== 'commands/list').length, 0, action)
     assert.equal(v.calls.filter(c => c.url.includes('final=1')).length, 0, action)
     assert.equal(v.tracks.stops, 1, action)
   }
@@ -700,9 +700,9 @@ test('release before microphone permission and short press discard audio; late p
   v.page.navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { grant = resolve })
   const hold = holdUi(v, 'chat'); hold.down(); await new Promise(r => setTimeout(r, 5)); hold.up()
   grant({ getTracks: () => [v.tracks] }); await new Promise(r => setTimeout(r, 10))
-  assert.equal(v.tracks.stops, 1); assert.equal(v.page.rpcCalls.length, 0)
+  assert.equal(v.tracks.stops, 1); assert.equal(v.page.rpcCalls.filter(call => call.method !== 'commands/list').length, 0)
   const short = voicePage(), shortHold = holdUi(short, 'chat'); shortHold.down(); await new Promise(r => setTimeout(r, 10)); shortHold.feed(2); shortHold.up()
-  await new Promise(r => setTimeout(r, 10)); assert.equal(short.page.rpcCalls.length, 0); assert.equal(short.calls.some(c => c.url === '/m/api/voice'), false)
+  await new Promise(r => setTimeout(r, 10)); assert.equal(short.page.rpcCalls.filter(call => call.method !== 'commands/list').length, 0); assert.equal(short.calls.some(c => c.url === '/m/api/voice'), false)
 })
 
 test('hold recording limit finishes once and later pointerup cannot submit twice', async () => {
@@ -1109,7 +1109,7 @@ test('call idle silence sends no ASR; a 250ms preroll precedes two seconds of sp
   const feed = level => v.nodes[0].onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(level) } })
   for (let n = 0; n < 118; n++) feed(0)
   await new Promise(r => setTimeout(r, 5)); assert.equal(requests.length, 0, 'ten seconds waiting for speech must not enter ASR')
-  assert.equal(v.page.rpcCalls.length, 0)
+  assert.equal(v.page.rpcCalls.filter(call => call.method !== 'commands/list').length, 0)
   feed(0.005) // quiet leading consonant retained by the pre-roll
   for (let n = 0; n < 24; n++) feed(0.1)
   for (let n = 0; n < 11; n++) feed(0)
@@ -2602,3 +2602,24 @@ test('suggestion wrapper uses textarea sizing and hides with hold UI',()=>{
  assert.match(html,/<div id="inputWrap"[^>]*><textarea id="input"[\s\S]*?<button id="inputSuggestion"[\s\S]*?<\/div>/)
  assert.match(css,/\.input-wrap\[hidden\]\{display:none\}/);assert.match(APP,/el\.input\.hidden = enabled; el\.inputWrap\.hidden = enabled/)
 })
+test('busy send queues message into dock with 3 choices (修改 / 引导 / 等待) and preserves wait choice across SSE updates',async()=>{
+ const page=bootApp(),{S,onFrame}=page.__dsh
+ const c=chatWithQueue(S,'s-busy-3way',true)
+ const input=page.els.get('input')
+ input.value='先别急，我补充一句'
+ input.dispatch('input')
+ page.els.get('send').onclick()
+ await new Promise(r=>setTimeout(r,10))
+ assert.equal(page.rpcCalls[0].method,'session.prompt')
+ assert.equal(page.rpcCalls[0].payload.mode,'queue')
+ onFrame({t:'queue',s:'s-busy-3way',items:[{id:'q1',text:'先别急，我补充一句',editText:'先别急，我补充一句',place:'queue'}]})
+ const html1=page.els.get('dock').innerHTML
+ assert.match(html1,/data-qedit="q1"[^>]*>[\s\S]*?修改<\/button>/)
+ assert.match(html1,/data-steer="q1"[^>]*>[\s\S]*?引导<\/button>/)
+ assert.match(html1,/data-qwait="q1"[^>]*>[\s\S]*?等待<\/button>/)
+ page.els.get('dock').dispatch('click',{target:{closest:sel=>sel==='[data-qwait]'?{dataset:{qwait:'q1'}}:null}})
+ assert.match(page.els.get('dock').innerHTML,/已选等待/)
+ onFrame({t:'queue',s:'s-busy-3way',items:[{id:'q1',text:'先别急，我补充一句',editText:'先别急，我补充一句',place:'queue'}]})
+ assert.match(page.els.get('dock').innerHTML,/已选等待/)
+})
+

@@ -106,7 +106,7 @@ test('voice prompt uses persisted request ID and inherited session configuration
 });
 test('message mode no longer renders a floating history and enter transmits the mode',()=>{
  assert.match(source,/voiceKind === "call" && local === "on" && React.createElement\(VoiceConversationDock/);
- assert.match(source,/React.createElement\(VoiceInlineMessages, \{sessionId,useSession,bus,callActive:/);
+ assert.match(source,/React.createElement\(VoiceInlineMessages, \{sessionId,useSession,useChat,bus,callActive:/);
  assert.match(source,/JSON.stringify\(\{ sessionId, on: true, mode, tabId/);
  assert.match(source,/const delay = 0;/);
 });

@@ -405,14 +405,19 @@ function rmsOf(samples) {
   for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
   return Math.sqrt(sum / samples.length);
 }
+function cleanSpeechText(s) {
+  const t = String(s ?? "").replace(/\s+\.\s*$/, "").trim();
+  const stripped = t.replace(/[\s.,????????????????\-???'"???????????)????\[\]????>]/g, "");
+  return stripped.length > 0 ? t : "";
+}
 async function resolveAsrFinal(settleStreaming, transcribeSense, preferStreamingFinal = false) {
   // Only verified call mode opts in. Do not start a redundant background
   // SenseVoice decode: it would still compete with the next turn's ASR/TTS.
   const senseP = preferStreamingFinal ? null : transcribeSense();
-  const settled = settleStreaming();
-  if (preferStreamingFinal && settled && settled.trim()) return settled;
-  const sense = await (senseP ?? transcribeSense());
-  return (sense && sense.trim() ? sense : settled) || "";
+  const settled = cleanSpeechText(settleStreaming());
+  if (preferStreamingFinal && settled) return settled;
+  const sense = cleanSpeechText(await (senseP ?? transcribeSense()));
+  return sense || settled || "";
 }
 async function prepareAsrVoiceMode(asr, mode) {
   if (mode !== "call") await asr.warmupSense();
@@ -1404,7 +1409,7 @@ function resolveNativeRuntime(opts = {}) {
     const childEnv = { ...env };
     delete childEnv.ELECTRON_RUN_AS_NODE;
     const probe = opts.probe ?? probeNode;
-    const candidates = [env.DSHVM_NODE, "node"].filter((c) => typeof c === "string" && c.length > 0);
+    const candidates = [env.DSHVM_NODE, "/opt/homebrew/bin/node", "/usr/local/bin/node", "node"].filter((c) => typeof c === "string" && c.length > 0);
     let execPath = null;
     for (const c of candidates) {
       execPath = probe(c, childEnv);
@@ -1808,7 +1813,7 @@ function createSherpaLocalEngine(options) {
               if (!treeOk) throw new Error("local TTS model download failed: espeak-ng-data");
             }
             if (!child) {
-              const runtime = options.kind === "kokoro" ? resolveNativeRuntime() : { env: process.env };
+              const runtime = resolveNativeRuntime();
               if (!runtime) throw new NativeRuntimeUnavailableError();
               child = fork(workerPath, [], {
                 stdio: ["ignore", "ignore", "pipe", "ipc"],
@@ -2433,7 +2438,7 @@ var respondJson2 = (res, status, payload) => {
   res.end(JSON.stringify(payload));
 };
 var VOICE_SPOKEN_SECTION = "voice-mode:spoken-format";
-var inject = ["webServer", "settings", "sessions"];
+var inject = ["webServer", "settings", "sessions", "connection", "profileContext"];
 var defaultModelCacheDir = () => process.platform === "win32" ? join5(process.env.LOCALAPPDATA ?? join5(homedir2(), "AppData", "Local"), "dsh-voice-mode", "models") : join5(homedir2(), ".cache", "dsh-voice-mode", "models");
 var VOICE_SETTINGS_DEFAULTS = {
   ttsEngine: "edge",
@@ -2626,6 +2631,12 @@ function voiceSettingsFromConfig(config) {
     yieldMs
   };
 }
+function voiceRequestRejection(connection,req){
+  if(typeof connection?.requestRejection!=="function")return undefined;
+  const rejection=connection.requestRejection(req);if(rejection)return rejection;
+  const admitted=connection.admit(req);
+  return admitted.rejection||(admitted.peer?.principal?.kind==="owner"?undefined:403);
+}
 function apply(ctx, config) {
   let activeVoiceSession = null;
   let activeVoiceMode = "message";
@@ -2645,6 +2656,8 @@ function apply(ctx, config) {
   ctx.effect(() => () => clearInterval(limiterPrune));
   const normalizedModelHost = () => validateModelHost(vset.modelHost, config.allowCustomModelHost) ?? HOST_PRIMARY;
   const denyNonLoopback = (req, res) => {
+    const rejection=voiceRequestRejection(ctx.get("connection"),req);
+    if(rejection){res.statusCode=typeof rejection==="number"?rejection:403;res.setHeader("content-type","application/json");res.end(JSON.stringify({code:"forbidden",error:"authenticated owner required"}));return true;}
     if (!config.allowLan && !isLoopbackRequest(req)) {
       res.statusCode = 403;
       res.setHeader("content-type", "application/json");

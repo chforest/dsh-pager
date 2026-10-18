@@ -1,7 +1,8 @@
-/* The desktop keeps its original UI; this adds a separate native picker. */
+/* The desktop keeps its original UI; this adds a native workspace picker and 3-way queue dock actions (修改 / 引导 / 等待). */
 ;(function () {
   'use strict'
-  if (location.pathname !== '/' || !['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname) || /Android|iPhone|iPad|DSHApp/i.test(navigator.userAgent) || navigator.standalone === true) return
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname) || location.pathname !== '/' || /Android|iPhone|iPad|DSHApp/i.test(navigator.userAgent) || navigator.standalone === true) return
+  var isLocal = true
   function start() {
     var id = 'dsh-local-folder', busy = false, toastTimer
     function notice(text) {
@@ -30,7 +31,64 @@
       } catch (err) { notice(err.message + '；请先核对工作区列表') }
       finally { busy = false; mount() }
     }
+    function labelBtn(btn, text, accent) {
+      if (!btn || btn.dataset.dshLabeled === text) return
+      btn.dataset.dshLabeled = text
+      btn.style.cssText = 'width:auto !important;height:26px !important;padding:0 8px !important;gap:4px !important;font-size:12px !important;font-weight:500 !important;' + (accent ? 'color:var(--theme-accent,#2563eb) !important;' : '')
+      var span = btn.querySelector('[data-dsh-lbl]')
+      if (!span) {
+        span = document.createElement('span')
+        span.setAttribute('data-dsh-lbl', '1')
+        btn.appendChild(span)
+      }
+      span.textContent = text
+    }
+    function enhanceQueueDock() {
+      var dock = document.querySelector('[data-queue-dock]')
+      if (!dock) return
+      var toggle = dock.querySelector('button[aria-controls="composer-queue-dock-list"][aria-expanded="false"]')
+      if (toggle && !dock.dataset.dshAutoExpanded) {
+        dock.dataset.dshAutoExpanded = '1'
+        toggle.click()
+      }
+      var rows = dock.querySelectorAll('#composer-queue-dock-list > div')
+      rows.forEach(function (row) {
+        var editBtn = row.querySelector('button[aria-label="编辑排队消息"],button[aria-label="Edit queued message"]')
+        var steerBtn = row.querySelector('button[aria-label="插话发送"],button[aria-label="Steer now"]')
+        var delBtn = row.querySelector('button[aria-label="删除排队消息"],button[aria-label="Remove queued message"]')
+        var bar = (editBtn || delBtn || steerBtn || {}).parentElement
+        if (!bar) return
+        labelBtn(editBtn, '修改', false)
+        labelBtn(steerBtn, '引导', true)
+        labelBtn(delBtn, '删除', false)
+        if (steerBtn && delBtn && steerBtn.previousElementSibling === delBtn) {
+          bar.insertBefore(steerBtn, delBtn)
+        }
+        var waitBtn = bar.querySelector('button[data-dsh-qwait]')
+        if (!waitBtn) {
+          waitBtn = document.createElement('button')
+          waitBtn.type = 'button'
+          waitBtn.setAttribute('data-dsh-qwait', '1')
+          waitBtn.className = (editBtn || delBtn).className
+          waitBtn.title = '保持排队等待当前回合结束后自动发送'
+          waitBtn.setAttribute('aria-label', '等待本轮完成')
+          waitBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-dsh-lbl="1">等待</span>'
+          waitBtn.style.cssText = 'width:auto !important;height:26px !important;padding:0 8px !important;gap:4px !important;font-size:12px !important;font-weight:500 !important;'
+          waitBtn.onclick = function () {
+            waitBtn.dataset.dshWaitAck = '1'
+            var lbl = waitBtn.querySelector('[data-dsh-lbl]')
+            if (lbl) lbl.textContent = '已选等待'
+            waitBtn.style.color = '#16a34a'
+            notice('已设为等待：当前回合结束后自动发送')
+          }
+          if (delBtn) bar.insertBefore(waitBtn, delBtn)
+          else bar.appendChild(waitBtn)
+        }
+      })
+    }
     function mount() {
+      enhanceQueueDock()
+      if (!isLocal) return
       var button = document.getElementById(id)
       if (!button) {
         var anchor = document.querySelector('button[aria-label="添加工作区"],button[aria-label="Add workspace"],button[aria-label="Add Workspace"]')

@@ -66,9 +66,10 @@ function isAudio(b, mime) {
 // No model request is made here. Limits reject new messages, never delete old audio.
 export function createVoiceStore({ dir, sessionLimit = 256 * 1024 * 1024, totalLimit = 2 * 1024 * 1024 * 1024, itemLimit = 1000 } = {}) {
   const root = path.resolve(dir)
+  const canon = p => (process.platform === 'darwin' ? path.resolve(p).replace(/^\/(var|tmp|etc)(?=\/|$)/, '/private/$1') : path.resolve(p)).toLowerCase()
   function safeDir(p) {
     fs.mkdirSync(p, { recursive: true })
-    if (fs.lstatSync(p).isSymbolicLink() || fs.realpathSync(p).toLowerCase() !== path.resolve(p).toLowerCase()) fail('语音目录不能使用链接', 403)
+    if (fs.lstatSync(p).isSymbolicLink() || fs.realpathSync(p).toLowerCase() !== canon(p)) fail('语音目录不能使用链接', 403)
   }
   function folder(s) { safeDir(root); const p = path.join(root, voiceSession(s)); safeDir(p); return p }
   function read(file) {
@@ -102,7 +103,7 @@ export function createVoiceStore({ dir, sessionLimit = 256 * 1024 * 1024, totalL
     if (typeof s !== 'string' || !SID.test(s)) return false
     const p = path.join(root, s)
     try {
-      if (fs.realpathSync(p).toLowerCase() !== p.toLowerCase()) return false
+      if (fs.realpathSync(p).toLowerCase() !== canon(p)) return false
       return fs.readdirSync(p, { withFileTypes: true }).some(e => e.isFile() && !e.isSymbolicLink() && e.name.endsWith('.json') && UUID.test(e.name.slice(0, -5)))
     } catch { return false }
   }

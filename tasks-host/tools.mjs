@@ -45,7 +45,7 @@ export function registerTaskTools(ctx,{service,adapter,defineTool}){
         const {agent,sid}=caller(ctx,exec);requestId=operationId(sid,exec.callId,args.requestId)
         if(!ACTIONS.includes(args.action))fail('不支持的任务操作')
         if(args.action!=='create'&&!args.id)fail('请先查询并指定任务编号')
-        const catalog=await adapter.catalog(),current=ctx.permissionPresets.current(agent.session.events)
+        const catalog=await adapter.catalog(),current=adapter.currentPermission ? adapter.currentPermission(agent.session) : ctx.permissionPresets.current(agent.session.events)
         if(!current)fail('无法确定当前会话权限，请先检查原生权限设置',409)
         const task={...(args.task||{})},existing=args.action==='create'?null:(await service.list(args.id))[0]
         if(args.action==='create'){

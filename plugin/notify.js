@@ -62,7 +62,8 @@ export class NotifyHub {
   /**
    * @param {{ wsBase: () => string, listSessions: () => Promise<{items: any[]}>, log?: (m: string) => void }} opts
    */
-  constructor({ wsBase, listSessions, log = () => {} }) {
+  constructor({ wsBase, listSessions, nativeStreams, log = () => {} }) {
+    this.nativeStreams = nativeStreams
     this.wsBase = wsBase
     this.listSessions = listSessions
     this.log = log
@@ -95,6 +96,7 @@ export class NotifyHub {
   stop() {
     this.stopped = true
     clearTimeout(this.timer)
+    this.disposeNative?.(); this.disposeNative = null
     for (const ws of this.sockets) { try { ws.close() } catch {} }
     for (const c of [...this.clients]) c.close()
   }
@@ -127,6 +129,16 @@ export class NotifyHub {
 
   connect() {
     if (this.stopped) return
+    if (this.nativeStreams) {
+      this.disposeNative?.()
+      this.disposeNative = this.nativeStreams({onMux:e=>this.onMux(e),onHost:e=>this.onHost(e),onError:()=>{
+        this.disposeNative?.(); this.disposeNative=null
+        clearTimeout(this.timer)
+        if(!this.stopped)this.timer=setTimeout(()=>this.connect(),3000)
+      }})
+      this.refresh()
+      return
+    }
     // The fresh mux replays everything still pending; whatever it does not
     // replay was settled while we were away and must be withdrawn on phones.
     const prevAsks = new Map(this.asks)

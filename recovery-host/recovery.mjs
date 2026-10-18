@@ -1,14 +1,16 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+const pluginTag = source => source?.kind==='plugin'?source.plugin:typeof source?.kind==='string'&&source.kind.startsWith('plugin:')?source.kind.slice(7):null
+const eventsOf = session => typeof session?.snapshotEvents==='function'?session.snapshotEvents():session?.events||[]
 const message = e => e?.data?.message || e?.data
 const sourceTag = row => 'dsh-recovery/' + row.id
 const isTask = (session,turn) => {
-  const start=session.events.findLastIndex(e=>e.type==='turn/start'&&e.data?.turn===turn)
+  const start=eventsOf(session).findLastIndex(e=>e.type==='turn/start'&&e.data?.turn===turn)
   if(start<0)return false
-  for(let i=start+1;i<session.events.length;i++){
-    const e=session.events[i];if(e.type==='turn/start')break
-    if(e.type==='user/message'&&message(e)?.source?.plugin?.startsWith('dsh-tasks/'))return true
+  for(let i=start+1;i<eventsOf(session).length;i++){
+    const e=eventsOf(session)[i];if(e.type==='turn/start')break
+    if(e.type==='user/message'&&pluginTag(message(e)?.source)?.startsWith('dsh-tasks/'))return true
   }
   return false
 }
@@ -41,11 +43,11 @@ export function createRecovery({file,bootId,adapter,now=Date.now,sharedContext})
     if(!row)return
     if(event.type==='user/message'){
       const source=message(event)?.source
-      row.sourceTag=source?.kind==='plugin'?source.plugin:null
+      row.sourceTag=pluginTag(source)
       row.goalId=source?.kind==='goal'?source.goalId:null
-      if(source?.plugin?.startsWith('dsh-recovery/'))row.status='recovery-running'
+      if(pluginTag(source)?.startsWith('dsh-recovery/'))row.status='recovery-running'
       else {row.lastUserSeq=event.seq;if(row.status==='recovery-running')row.status='active'}
-      if(source?.plugin?.startsWith('dsh-tasks/'))row.status='task-owned'
+      if(pluginTag(source)?.startsWith('dsh-tasks/'))row.status='task-owned'
     }
     if(event.type==='goal/change'&&['pause','clear'].includes(event.data?.operation))row.status='stopped'
     if(event.type==='turn/end'&&event.data.turn===row.turn){
@@ -65,13 +67,13 @@ export function createRecovery({file,bootId,adapter,now=Date.now,sharedContext})
     // Loading yields to user input/cancellation. Do not act on a replaced or
     // stopped checkpoint after the awaited native resume.
     if(state.rows[row.sessionId]!==row||!['active','disposed'].includes(row.status))return
-    const session=agent.session,events=session.events||[]
+    const session=agent.session,events=eventsOf(session)||[]
     const stop=status=>{row.status=status;save()}
     if(isTask(session,row.turn))return stop('task-owned')
     if(agent.status!=='idle'||agent.inbox?.hasPending)return
     const goal=adapter.goal?.(agent)
     if(goal&&goal.phase!=='complete')return stop('goal-owned-or-paused')
-    if(events.some(e=>e.type==='user/message'&&message(e)?.source?.plugin===sourceTag(row)))return stop('dispatched')
+    if(events.some(e=>e.type==='user/message'&&pluginTag(message(e)?.source)===sourceTag(row)))return stop('dispatched')
     if(events.some(e=>e.seq>row.lastUserSeq&&e.type==='user/message'))return stop('new-user-input')
     if(events.some(e=>e.seq>row.startSeq&&e.type==='goal/change'&&['pause','clear'].includes(e.data?.operation)))return stop('stopped')
     const end=events.find(e=>e.type==='turn/end'&&e.data?.turn===row.turn&&e.seq>row.startSeq)
@@ -88,7 +90,7 @@ export function createRecovery({file,bootId,adapter,now=Date.now,sharedContext})
   }
   const safeObserve=(session,event)=>{try{observe(session,event)}catch{failed=true;try{adapter.onError?.('recovery checkpoint failed; automatic recovery disabled')}catch{}}}
   return {context,observe:safeObserve,
-    trackCurrent(agent){if(agent.status!=='running'||state.rows[agent.session.id])return;const events=agent.session.events||[];const start=events.findLastIndex(e=>e.type==='turn/start');if(start>=0)for(const event of events.slice(start))safeObserve(agent.session,event)},
+    trackCurrent(agent){if(agent.status!=='running'||state.rows[agent.session.id])return;const events=eventsOf(agent.session)||[];const start=events.findLastIndex(e=>e.type==='turn/start');if(start>=0)for(const event of events.slice(start))safeObserve(agent.session,event)},
     prepareRestart(){if(failed)throw Error('recovery storage unavailable');const intent={nonce:crypto.randomUUID(),bootId,expiresAt:now()+10*60*1000};state.intent=intent;save();return{...intent,scope:'只准备更新重启；不执行更新，不增加操作授权'}},
     async recover(){if(closed||working||failed)return;working=true;try{for(const row of candidates){if(closed||failed)break;try{await attempt(row)}catch{row.note='恢复核对失败，尚未派发';try{save()}catch{failed=true;adapter.onError?.('recovery journal failed; disabled')}}}}finally{working=false}},
     status(){return {context,rows:Object.values(state.rows).map(({sessionId,status,note})=>({sessionId,status,note:note??null}))}},

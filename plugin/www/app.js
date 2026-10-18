@@ -64,6 +64,7 @@
 
   // ------------------------------------------------------------ icons
   var P = {
+    settings: '<path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM10 3h4l1 3 3 1 3 3v4l-3 1-1 3-3 3h-4l-1-3-3-1-3-3v-4l3-1 1-3z"/>',
     mic: '<rect x="8" y="2" width="8" height="13" rx="4"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/>',
     shield: '<path d="M12 3l8 3v6c0 5-8 9-8 9S4 17 4 12V6l8-3z"/><path d="M9 12l2 2 4-4"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
@@ -98,6 +99,7 @@
     bulb: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
     zap: '<path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"/>',
     steer: '<path d="M12 20V5M6 11l6-6 6 6"/><path d="M4 20h4M16 20h4"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
     stats: '<path d="M5 20V11M12 20V5M19 20v-8"/>',
   }
   function ic(n, cls) { return '<svg class="i' + (cls ? ' ' + cls : '') + '" viewBox="0 0 24 24" aria-hidden="true">' + (P[n] || P.other) + '</svg>' }
@@ -303,8 +305,7 @@
     suggestion.timer = setTimeout(function () {
       suggestion.timer = null
       if (suggestionKey() !== key || generation !== suggestion.generation) return
-      suggestion.seen.add(key)
-      var controller = new AbortController(); suggestion.controller = controller
+      var controller = new AbortController(); suggestion.controller = controller; suggestion.seen.add(key)
       fetch('/m/api/suggestions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: sid }), signal: controller.signal, redirect: 'manual' }).then(handle).then(function (value) {
         if (generation !== suggestion.generation || suggestionKey() !== key) return
         suggestion.controller = null
@@ -480,6 +481,7 @@
     S.wsById = {}
     v.workspaces.forEach(function (w) { S.wsById[w.id] = w })
     S.blanks = v.blanks || {}
+    S.dshVersion = v.dshVersion || ''
     var local = S.byId
     S.sessions = v.sessions
     S.byId = {}
@@ -1085,7 +1087,9 @@
     var controller = new AbortController(), timer = setTimeout(function () { controller.abort() }, 90000)
     options.signal = controller.signal
     return fetch(route, options).then(function (response) {
-      return response.json().then(function (value) { if (!response.ok) throw new Error(value.error || '语音服务暂不可用'); return value })
+      if (response.status === 401) throw new Error('连接登录已失效，请重新登录后再试')
+      if (response.status === 404) throw new Error('电脑端尚未启用语音服务，请检查语音插件')
+      return response.json().catch(function () { throw new Error('语音服务尚未就绪，请稍后重试或检查电脑端语音插件') }).then(function (value) { if (!response.ok) throw new Error(typeof value.error === 'string' ? value.error : value.error && value.error.message || '语音服务暂不可用'); return value })
     }).then(function (value) { clearTimeout(timer); return value }, function (error) { clearTimeout(timer); throw error })
   }
   function voiceJson(route, body) {
@@ -1414,7 +1418,7 @@
       v.failedSave = false; el.callInterrupt.textContent = '打断并说'; v.pendingVoice = null; v.replyTo = item.id; v.requestId = item.requestId; v.waiting = true; v.responseSeen = false; v.turnDone = false; v.modelSpeech = false
       voiceHint(v, '正在等待 DSH 回复…'); el.voiceFinish.textContent = '继续说'
       callStage(v, 'promptSubmittedAt')
-      send({ voice: true, text: item.text, rid: item.requestId })
+      send({ voice: true, mode: v.mode === 'call' ? 'call' : 'message', text: item.text, rid: item.requestId })
     }).catch(function (error) {
       if (voice !== v) return
       v.failedSave = true; voiceHint(v, '语音未发送，原声暂存在此页面：' + error.message); el.voiceFinish.textContent = '重试发送'; el.callInterrupt.textContent = '重试发送'
@@ -1476,7 +1480,7 @@
     if (!sid || isAgent(sid) || voice) return
     if (voiceStarting) { toast('上一次录音正在收尾，请稍候'); return }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !Audio) { toast('当前环境不支持录音，请更新 App 或使用 HTTPS 浏览器', 'err'); return }
-    if (conversation && (el.input.value.trim() || S.att.length || isRunning(sid))) { toast('请先处理输入框草稿，并等待当前任务完成；也可以先用录音转文字'); return }
+    if (conversation && (el.input.value.trim() || S.att.length)) { toast('请先处理输入框草稿或已添加的图片；也可以先用录音转文字'); return }
     var v = { sid: sid, tab: uuid(), mode: mode, conversation: conversation, audioPending: 0, ttsBusy: false, responseSeen: false, ctx: new Audio(), epoch: 1, sent: 0, parts: [], count: 0, total: 0, quiet: 0, hadSpeech: false, text: '', base: el.input.value, preview: el.input.value, chain: Promise.resolve(), playChain: Promise.resolve(), playGeneration: 0 }
     if (mode === 'call') { v.callId = uuid(); v.callStartedAt = new Date().toISOString() }
     v.preRoll = []; v.preRollCount = 0; v.recorded = []; v.replyAudio = {}; v.barge = []; v.bargeCount = 0; v.detectPositive = 0; v.captions = {}; el.voiceCaption.textContent = ''; el.voiceCaption.hidden = !conversation; el.voiceEnd.hidden = !conversation; el.voiceBar.classList.toggle('dictation', !conversation); el.mic.setAttribute('aria-label', conversation ? '退出语音' : '结束录音')
@@ -1490,8 +1494,7 @@
       if (mode === 'call' && !v.autoBarge) toast('此设备未确认回声消除，请用“打断并说”接话')
       // Resolve a cold session through the native command inventory, not a
       // model prompt; this attaches the voice session without billing a turn.
-      return voiceJson('/api/commands/list', { type: 'client-request', rpcId: uuid(), method: 'commands/list', payload: { args: { agentId: sid } } }).then(function (result) {
-        if (!result.result || !result.result.ok) throw new Error('这个对话暂不能开启语音')
+      return rpc('commands/list', { args: { agentId: sid } }).then(function () {
         if (voice !== v) return null
         v.sse = new EventSource('/voice-mode/stream?tabId=' + enc(v.tab))
         var baseline = new Promise(function (resolve, reject) {
@@ -1779,7 +1782,14 @@
         return
       }
       case 'todo': c.todos = f.todos; if (c.id === S.cur) drawDock(); return
-      case 'queue': c.queue = f.items || []; pruneQueue(c); if (c.id === S.cur) drawDock(); return
+      case 'queue': {
+        var prevWait = {}
+        ;(c.queue || []).forEach(function (x) { if (x.id && x.waitAck) prevWait[x.id] = true })
+        c.queue = (f.items || []).map(function (x) { return x.id && prevWait[x.id] ? Object.assign({}, x, { waitAck: true }) : x })
+        pruneQueue(c)
+        if (c.id === S.cur) drawDock()
+        return
+      }
     }
   }
   function resync() {
@@ -2133,16 +2143,21 @@
     h += asyncQuestionHtml(c)
     ;(c.queue || []).forEach(function (x) {
       var busy = c.queueBusy && c.queueBusy[x.id], disabled = busy ? ' disabled' : ''
-      h += '<div class="qitem"><span>' + esc(x.text || '图片') + '</span><em>' + (busy ? '处理中…' : x.place === 'steering' ? '等待接收插话' : '排队中') + '</em>'
-      if (x.id && x.place !== 'steering') h += '<div class="qactions">'
-        + '<button data-qedit="' + esc(x.id) + '" aria-label="编辑消息"' + disabled + '>' + ic('edit', 's') + '编辑</button>'
+      var stale = x.place === 'steering' && !isRunning(c.id)
+      var running = isRunning(c.id)
+      var statusText = busy ? '处理中…' : stale ? '本轮已结束，未送达' : x.place === 'steering' ? '已引导 · 等待接收插话' : x.waitAck ? '排队中 · 等待本轮完成' : running ? '排队中 · 可修改 / 引导 / 等待' : '排队中'
+      h += '<div class="qitem"><span>' + esc(x.text || '图片') + '</span><em>' + statusText + '</em>'
+      if (x.id && (x.place !== 'steering' || stale)) h += '<div class="qactions">'
+        + '<button data-qedit="' + esc(x.id) + '" aria-label="编辑消息"' + disabled + '>' + ic('edit', 's') + '修改</button>'
+        + (running && x.place !== 'steering' ? '<button data-steer="' + esc(x.id) + '" aria-label="插话发送"' + disabled + '>' + ic('steer', 's') + '引导</button>' : '')
+        + (running && x.place !== 'steering' ? '<button data-qwait="' + esc(x.id) + '" class="' + (x.waitAck ? 'on' : '') + '" aria-label="等待本轮完成"' + disabled + '>' + ic('clock', 's') + (x.waitAck ? '已选等待' : '等待') + '</button>' : '')
         + '<button data-unqueue="' + esc(x.id) + '" aria-label="删除排队消息"' + disabled + '>' + ic('delete', 's') + '删除</button>'
-        + (isRunning(c.id) && x.place !== 'steering' ? '<button data-steer="' + esc(x.id) + '" aria-label="插话发送"' + disabled + '>' + ic('steer', 's') + '插话发送</button>' : '') + '</div>'
+        + '</div>'
       h += '</div>'
     })
     // The PC dock's "steer all": every still-pending row, in FIFO order.
     if (isRunning(c.id) && (c.queue || []).filter(function (x) { return x.id && x.place !== 'steering' }).length > 1) {
-      h += '<div class="qitem qall"><span>把排队的都插进去</span><button data-steerall="1" aria-label="全部插队">' + ic('steer', 's') + '</button></div>'
+      h += '<div class="qitem qall"><span>把排队的都引导插话</span><button data-steerall="1" aria-label="全部插队">' + ic('steer', 's') + '</button></div>'
     }
     if (c.todos && c.todos.length) h += todoHtml(c)
     el.dock.innerHTML = h
@@ -2237,7 +2252,10 @@
     drawThumbs(); autosize(); syncSend()
     }
     buzz(8)
-    rpc('session.prompt', { sessionId: c.id, mode: 'queue', content: content, clientTimeZone: TZ }, rid).then(function (v) {
+    var send = function (mode) { return rpc('session.prompt', { sessionId: c.id, mode: mode, content: content, clientTimeZone: TZ }, rid) }
+    // When busy, queue first (except live voice call) so the user gets the 3 choices in the dock: 修改 / 引导 / 等待.
+    var useSteer = busy && directVoice && voiceSend.mode === 'call'
+    ;(useSteer ? send('steer').catch(function (e) { if (/steer/i.test(e && e.message || '')) return send('queue'); throw e }) : send('queue')).then(function (v) {
       if (v && v.command) {
         c.pending = c.pending.filter(function (p) { return p !== pend })
         draw(c)
@@ -2245,6 +2263,8 @@
       } else if (!busy) {
         setRun(c.id, true)
         touch(c.id)
+      } else if (!useSteer) {
+        toast('已加入待发栏：可选择「修改」「引导」或「等待」')
       }
     }, function (e) {
       c.pending = c.pending.filter(function (p) { return p !== pend })
@@ -2441,7 +2461,7 @@
       '<button class="opt-row" data-a="files"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>工作区文件</b><small>' + esc(wsTitle(wsOf(c.id))) + '</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="tasks"><span class="ico">' + ic('stats', 's') + '</span><span class="mid"><b>自动任务</b><small>定时执行、目标计划与进度</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="usage"><span class="ico">' + ic('stats', 's') + '</span><span class="mid"><b>用量</b><small>token、缓存命中、上下文占用、耗时</small></span>' + ic('chev', 's') + '</button>' +
-      '<button class="opt-row" data-a="reload"><span class="ico">' + ic('refresh', 's') + '</span><span class="mid"><b>更新界面并重连</b><small>保存文字草稿，加载最新界面</small></span></button>' +
+      '<button class="opt-row" data-a="settings"><span class="ico">' + ic('settings', 's') + '</span><span class="mid"><b>设置</b><small>声音、通知、连接与界面更新</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="rename"><span class="ico">' + ic('pen', 's') + '</span><span class="mid"><b>重命名</b></span></button>' +
       '<button class="opt-row danger" data-a="archive"><span class="ico">' + ic('archive', 's') + '</span><span class="mid"><b>归档对话</b><small>从列表隐藏，记录仍保存在电脑上</small></span></button></div>')
     el.sheet.onclick = function (e) {
@@ -2453,7 +2473,7 @@
         if (S.att.length) { toast('请先发送或移除已添加的图片，避免丢失附件'); return }
         saveDraft(); location.href = '/m/tasks.html?s=' + enc(c.id); return
       }
-      if (a === 'reload') { reloadUi(); return }
+      if (a === 'settings') { settingsSheet(); return }
       if (a === 'archive' && !b.dataset.sure) { b.dataset.sure = '1'; b.querySelector('b').textContent = '再点一次确认归档'; buzz(); return }
       closeOverlay().then(function () {
         if (a === 'model') modelSheet()
@@ -2721,12 +2741,16 @@
       default: return ''
     }
   }
-  el.status.onclick = function () {
-    openSheet('<div class="sh-h">连接<small>' + esc(location.host) + '</small></div><div class="sh-b">' +
+  function settingsSheet() {
+    openSheet('<div class="sh-h">设置<small>' + esc(location.host) + '</small></div><div class="sh-b">' +
+      '<button class="opt-row" data-a="speakers"><span class="ico">' + ic('mic', 's') + '</span><span class="mid"><b>声音设置</b><small>选择声音、试听语音回复</small></span>' + ic('chev', 's') + '</button>' +
+      (S.cur && S.chats.has(S.cur) ? '<button class="opt-row" data-a="model"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>当前对话模型</b><small>模型和推理等级</small></span>' + ic('chev', 's') + '</button>' : '<div class="opt-row"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>对话模型</b><small>进入对话后，点击顶部模型名称进行设置</small></span></div>') +
       '<button class="opt-row" data-a="reload"><span class="ico">' + ic('refresh', 's') + '</span><span class="mid"><b>更新界面并重连</b><small>' +
       ({ online: '当前已连接', connecting: '正在连接…', offline: '电脑暂时连不上' })[S.status] + '</small></span></button>' +
       (IN_APP ? '<button class="opt-row" data-a="server"><span class="ico">' + ic('web', 's') + '</span><span class="mid"><b>切换服务器</b><small>换一台电脑，或换一个访问地址</small></span>' + ic('chev', 's') + '</button>' : '') +
       '<button class="opt-row" data-a="usage"><span class="ico">' + ic('stats', 's') + '</span><span class="mid"><b>最近 7 天用量</b><small>token、缓存命中，用得最多的会话</small></span>' + ic('chev', 's') + '</button>' +
+      (IN_APP ? '<div class="opt-row"><span class="ico">' + ic('alert', 's') + '</span><span class="mid"><b>通知权限</b><small>在设备系统设置 → 应用 → DSH → 通知中管理</small></span></div>' : '') +
+      '<div class="opt-row"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>DSH 版本</b><small>' + esc(S.dshVersion || '未知（请点“更新界面并重连”）') + '</small></span></div>' +
       '<div id="pushRows"></div></div>')
     var cur = { state: 'app' }
     function paintPush() {
@@ -2741,6 +2765,8 @@
       var b = e.target.closest('[data-a]')
       if (!b || b.disabled) return
       var a = b.dataset.a
+      if (a === 'speakers') { speakerSettings(); return }
+      if (a === 'model') { modelSheet(); return }
       if (a === 'server') { location.href = 'dshapp://setup'; return }
       if (a === 'usage') { closeOverlay().then(weekSheet); return }
       if (a === 'push-on') {
@@ -2762,6 +2788,8 @@
       reloadUi()
     }
   }
+  el.status.onclick = settingsSheet
+  document.getElementById('btnSettings').onclick = settingsSheet
   document.getElementById('btnSearch').onclick = function () { el.searchBox.hidden = false; el.q.focus() }
   document.getElementById('qClose').onclick = function () { el.q.value = ''; S.query = ''; el.searchBox.hidden = true; renderHome() }
   el.q.oninput = function () { S.query = el.q.value.trim(); renderHome() }
@@ -2980,6 +3008,11 @@
       return
     }
     if ((b = e.target.closest('[data-qedit]'))) { editQueued(c, b.dataset.qedit); return }
+    if ((b = e.target.closest('[data-qwait]'))) {
+      var row = queueItem(c, b.dataset.qwait)
+      if (row) { row.waitAck = true; buzz(8); drawDock(); toast('已设为等待：当前回合结束后自动发送') }
+      return
+    }
     if ((b = e.target.closest('[data-unqueue]'))) {
       updateQueued(c, b.dataset.unqueue, { kind: 'remove' })
       return

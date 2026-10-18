@@ -14,11 +14,12 @@
     "isolated native call ASR with fallback",
     "bounded preview cache",
     "local prewarm and TTS latency events",
-    "call sentence boundaries and concise spoken prompt"
+    "call sentence boundaries and concise spoken prompt",
+    "DSH 0.2.1 separate chat snapshots and authenticated owner routes"
   ],
   "sha256": {
-    "lib/client.js": "2f00889dff3869a9b2b8f9a30e3e2f13ba300aa40913509906eda3ec637dc39f",
-    "lib/index.js": "bde04e2e7ec602515c357a9ee812edf24c30e85cd8ea6a14df459e7244c9d39a",
+    "lib/client.js": "39e9dc0a979e679fa227ffd82c3a2a19c2bc7107420cfee23727262facb72ca1",
+    "lib/index.js": "fe4a13f983f2820456df2486e9aa4ea927b21eae9788a2c6102b3410328a8af0",
     "lib/msedge-tts.cjs": "5bc5d00708f1e0cdba6c3a9ab8b2969a0736e18588ca195ac9de7889675d04e7",
     "lib/native-call-asr-worker.cjs": "5643c4def26528415a1db3621e6360be3b67578bc281c77547ba9e855a49d2fd",
     "lib/native-call-asr.mjs": "20fffa588ec0a4aa59343eca160ef0e75d11ed69def28ca8a7abe437f98ba020",

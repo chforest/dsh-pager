@@ -22,9 +22,12 @@ window.__ModuleLoader__.load({id:'dsh-task-timeline',factory:require=>{
   const node=visible.find(n=>n.anchorSeq>=source.seq);return node?.key||null;
  }
  function findRow(root,key){if(!root||!key)return null;return Array.from(root.querySelectorAll('[data-chat-anchor-key]')).find(node=>node.dataset.chatAnchorKey===key)||null;}
+ function timelineSession(session,chat){return chat?{...session,chat,...chat.legacy}:session;}
  function portalComponent(original,kind){
   function Timeline(props){
-   const projection=props.useProjection(kind==='goal'?'goal':'todos'),key=anchorKey(props.session,kind,projection);
+   const chat=props.useChat?props.useChat(s=>s):null;
+   const session=timelineSession(props.session,chat);
+   const projection=props.useProjection(kind==='goal'?'goal':'todos'),key=anchorKey(session,kind,projection);
    const marker=React.useRef(null),container=React.useRef(null),[target,setTarget]=React.useState(null);
    const present=kind==='todo'?Array.isArray(projection)&&projection.length>0:!!projection?.goal&&projection.goal.phase!=='complete';
    React.useLayoutEffect(()=>()=>{container.current?.remove();container.current=null;},[props.sessionId]);
@@ -57,5 +60,5 @@ window.__ModuleLoader__.load({id:'dsh-task-timeline',factory:require=>{
   const unsubscribe=ctx.slots.subscribe(SLOT,sync);sync();return()=>{closed=true;unsubscribe();for(const item of mounted.values())item.dispose();mounted.clear();};
  }
  function apply(ctx){ctx.slots.inject(SLOT,()=>install(ctx));}
- return{inject:['slots'],apply,install,anchorKey,sameTodos,findRow,portalComponent};
+ return{inject:['slots'],apply,install,anchorKey,sameTodos,findRow,portalComponent,timelineSession};
 }});

@@ -17,9 +17,10 @@ const text = (value, max, label) => { if (typeof value !== 'string' || !value.tr
 export function createAsyncQuestions({ dir, deliver, maxRecords = 1000, maxBytes = 16 * 1024 * 1024, deliveryTimeoutMs = 30000, now = () => Date.now() } = {}) {
   if (!dir || typeof dir !== 'string') fail('缺少问题存储目录')
   const root = path.resolve(dir), records = new Map(), waiters = new Map()
+  const canon = p => (process.platform === 'darwin' ? path.resolve(p).replace(/^\/(var|tmp|etc)(?=\/|$)/, '/private/$1') : path.resolve(p)).toLowerCase()
   let closed = false
   fs.mkdirSync(root, { recursive: true, mode: 0o700 })
-  if (fs.lstatSync(root).isSymbolicLink() || fs.realpathSync(root).toLowerCase() !== root.toLowerCase()) fail('问题目录不能使用链接', 403)
+  if (fs.lstatSync(root).isSymbolicLink() || fs.realpathSync(root).toLowerCase() !== canon(root)) fail('问题目录不能使用链接', 403)
   const names = fs.readdirSync(root).filter(n => n.endsWith('.json'))
   if (names.length > maxRecords) fail('问题存储条数已满', 507)
   let total = 0

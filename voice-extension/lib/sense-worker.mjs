@@ -1,18 +1,18 @@
-// src/sense-worker.ts
+// src/sense-worker.ts (upgraded to native sherpa-onnx-node 2-thread ARM64 + silence/punctuation gate)
 import { parentPort, workerData } from "node:worker_threads";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+
 function createSenseWorkerClient(worker) {
   let counter = 0;
-  const pending = /* @__PURE__ */ new Map();
+  const pending = new Map();
   let dead = false;
-  const deathFns = /* @__PURE__ */ new Set();
+  const deathFns = new Set();
   const die = () => {
     if (dead) return;
     dead = true;
     for (const fn of deathFns) {
-      try {
-        fn();
-      } catch {
-      }
+      try { fn(); } catch {}
     }
   };
   worker.on?.("message", (msg) => {
@@ -62,51 +62,89 @@ function createSenseWorkerClient(worker) {
       const err = new Error("sense worker terminated");
       for (const [, p] of pending) p.reject(err);
       pending.clear();
-      try {
-        await worker.terminate?.();
-      } catch {
-      }
+      try { await worker.terminate?.(); } catch {}
     }
   };
 }
+
+function cleanSpeechText(s) {
+  const t = String(s ?? "").replace(/\s+\.\s*$/, "").trim();
+  const stripped = t.replace(/[\s.,????????????????\-???'"???????????)????\[\]????>]/g, "");
+  return stripped.length > 0 ? t : "";
+}\p{N}]/u.test(t) ? t : "";
+}
+
+function rmsOfSamples(samples) {
+  if (!samples || !samples.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  return Math.sqrt(sum / samples.length);
+}
+
 function startSenseWorker(data) {
   const port = parentPort;
   if (!port) return;
-  let recognizer = null;
-  let sherpa = null;
+  let nativeRec = null;
+  let wasmRec = null;
+  let sherpaWasm = null;
   port.on("message", async (msg) => {
     try {
       if (msg.op === "create" || msg.op === "decode") {
-        if (!sherpa) {
-          sherpa = await import(data.sherpaModule);
-        }
-        if (!recognizer) {
-          recognizer = sherpa.createOfflineRecognizer({
-            featConfig: { sampleRate: 16e3, featureDim: 80 },
-            modelConfig: {
-              senseVoice: {
-                model: data.modelDir + "/model.int8.onnx",
-                language: data.language,
-                useInverseTextNormalization: data.useITN
-              },
-              tokens: data.modelDir + "/tokens.txt",
-              provider: "cpu",
-              debug: 0
-            }
-          });
+        if (!nativeRec && !wasmRec) {
+          try {
+            const { OfflineRecognizer } = require("sherpa-onnx-node");
+            nativeRec = new OfflineRecognizer({
+              featConfig: { sampleRate: 16e3, featureDim: 80 },
+              modelConfig: {
+                senseVoice: {
+                  model: data.modelDir + "/model.int8.onnx",
+                  language: data.language,
+                  useInverseTextNormalization: data.useITN
+                },
+                tokens: data.modelDir + "/tokens.txt",
+                numThreads: 2,
+                provider: "cpu",
+                debug: 0
+              }
+            });
+          } catch {
+            if (!sherpaWasm) sherpaWasm = await import(data.sherpaModule);
+            wasmRec = sherpaWasm.createOfflineRecognizer({
+              featConfig: { sampleRate: 16e3, featureDim: 80 },
+              modelConfig: {
+                senseVoice: {
+                  model: data.modelDir + "/model.int8.onnx",
+                  language: data.language,
+                  useInverseTextNormalization: data.useITN
+                },
+                tokens: data.modelDir + "/tokens.txt",
+                provider: "cpu",
+                debug: 0
+              }
+            });
+          }
         }
         if (msg.op === "decode" && msg.samples) {
-          const stream = recognizer.createStream();
+          if (rmsOfSamples(msg.samples) < 0.014) {
+            port.postMessage({ id: msg.id, ok: true, text: "" });
+            return;
+          }
+          if (nativeRec) {
+            const stream = nativeRec.createStream();
+            stream.acceptWaveform({ sampleRate: 16e3, samples: msg.samples });
+            nativeRec.decode(stream);
+            const text = cleanSpeechText(nativeRec.getResult(stream).text);
+            port.postMessage({ id: msg.id, ok: true, text });
+            return;
+          }
+          const stream = wasmRec.createStream();
           try {
             stream.acceptWaveform(16e3, msg.samples);
-            recognizer.decode(stream);
-            const text = recognizer.getResult(stream).text.trim();
+            wasmRec.decode(stream);
+            const text = cleanSpeechText(wasmRec.getResult(stream).text);
             port.postMessage({ id: msg.id, ok: true, text });
           } finally {
-            try {
-              stream.free();
-            } catch {
-            }
+            try { stream.free(); } catch {}
           }
           return;
         }

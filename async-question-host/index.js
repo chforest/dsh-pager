@@ -2,13 +2,16 @@ import crypto from 'node:crypto'
 import {createRequire} from 'node:module'
 import path from 'node:path'
 import {pathToFileURL} from 'node:url'
+import {nativeHostDependencies} from '../plugin/host-compat.mjs'
+import {createHostFetch} from '../plugin/host-http.mjs'
 
 export const name = 'async-questions'
-export const inject = ['tools', 'systemPrompt', 'webServer']
+export const inject = [...new Set(['tools', 'systemPrompt', 'webServer',...nativeHostDependencies()])]
 export const guidance = `普通偏好、样式选择、可稍后补充的信息，优先使用 ask_user_async。该工具等待用户最多60秒；超时返回deferred/answered:false，表示用户尚未回答，绝非同意任何方案。收到deferred后主动继续independent_work所述且既有授权内、不依赖答案的工作，不要重复提问或不断调用等待工具。问题持续保留，用户稍后回答会作为原会话的新消息送达；结合当前进度调整，不重做完成的动作。必要的安全、付费、发布、删除、权限或方案批准，以及缺失答案就无法安全推进的事项，仍用原生ask_user_question及审批机制，不得用本工具绕过。不要把界面里默认选项当成用户回答。`
 export async function apply(ctx) {
-  const fromHost=createRequire(path.resolve(process.argv[1]))
+  const fromHost={resolve:spec=>{for(const c of [process.argv[1]&&!process.argv[1].startsWith('-')?path.resolve(process.argv[1]):null,import.meta.url,'/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/package.json'].filter(Boolean)){try{return createRequire(c).resolve(spec)}catch{}}return createRequire(import.meta.url).resolve(spec)}}
   const {defineTool}=await import(pathToFileURL(fromHost.resolve('@deepseek-ai/dsh-tools')).href)
+  const hostFetch=createHostFetch(ctx)
   ctx.systemPrompt.section({ name: 'async-clarification-workflow', order: 110, text: guidance })
   ctx.tools.register(defineTool({
     name: 'ask_user_async',
@@ -28,7 +31,7 @@ export async function apply(ctx) {
       if (typeof sid !== 'string' || !sid.startsWith('session-')) throw new Error('异步问题必须属于当前DSH会话')
       const digest = crypto.createHash('sha256').update(sid + ':' + (exec.callId || crypto.randomUUID())).digest('hex')
       const requestId = `${digest.slice(0,8)}-${digest.slice(8,12)}-4${digest.slice(13,16)}-a${digest.slice(17,20)}-${digest.slice(20,32)}`
-      const response = await fetch(`http://127.0.0.1:${ctx.webServer.port}/m/api/async-questions/create`, {
+      const response = await hostFetch(`http://127.0.0.1:${ctx.webServer.port}/m/api/async-questions/create`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ s: sid, kind: 'clarification', question: args.question, options: args.options || [], independentWork: args.independent_work, requestId }),
         signal: exec.signal ? AbortSignal.any([exec.signal, AbortSignal.timeout(80000)]) : AbortSignal.timeout(80000),

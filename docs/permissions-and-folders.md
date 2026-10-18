@@ -8,21 +8,21 @@
 
 ## 手机和平板选择电脑目录
 
-此目录浏览服务当前仅支持 **Windows 宿主电脑的本地磁盘**（盘符及目录联接校验）。手机和平板是访问端，不是读取其自身存储；Linux/macOS 宿主目录浏览尚未实现，不能据通用网页可打开就视为支持。AppData、凭据和其他敏感目录仍被拒绝。
+此目录浏览服务支持 **Windows 与 macOS 宿主电脑的本地磁盘**（Windows 盘符及目录联接校验；macOS 主目录、`/Users`、`/Volumes` 及符号链接真实路径校验）。手机和平板（Android / iPhone / iPad）是访问端，不是读取其自身存储；AppData、`Library`、`.ssh`、`.gnupg`、`.aws`、钥匙串及其他凭据和敏感系统目录仍被拒绝。
 
-真实磁盘/目录联接集成测试仅在 Windows 执行，其他平台明确跳过；Windows 测试夹具建在仓库工作目录的独立临时子目录中，避免系统临时目录位于 AppData 而被正确拒绝。测试结束删除自己的夹具，不放宽生产安全规则。
+真实磁盘/目录链接集成测试按当前运行平台执行；Windows 测试夹具建在仓库工作目录的独立临时子目录中，避免系统临时目录位于 AppData 而被正确拒绝。测试结束删除自己的夹具，不放宽生产安全规则。
 
-新对话的工作区列表下方点击“浏览电脑文件夹”，选择磁盘或常用工作区，可逐层进入、返回上一级，也可输入电脑完整路径。点击“选用此文件夹”后复用或添加工作区，进入该工作区的新对话。取消只关闭目录选择器。
+新对话的工作区列表下方点击“浏览电脑文件夹”，选择磁盘/主目录或常用工作区，可逐层进入、返回上一级，也可输入电脑完整路径。点击“选用此文件夹”后复用或添加工作区，进入该工作区的新对话。取消只关闭目录选择器。
 
 自动任务的新建/编辑表单也有同一入口；选中目录后只更新工作区，保留已填写的目标和计划，仍由用户点击保存任务。
 
-`GET /m/api/folders` 只列出本机磁盘、已登记工作区和指定目录的一层子目录；`POST /m/api/folders/workspace` 验证真实目录后调用原生 `workspace.create`。沿用手机网关的访问校验，不放开通用 RPC 写接口。网络映射盘、UNC、设备路径和凭据目录不可浏览；目录链接校验目标。取消与浏览不创建会话，重复确认有在途锁，未知添加结果需先核对工作区列表。
+`GET /m/api/folders` 只列出本机根入口、已登记工作区和指定目录的一层子目录；`POST /m/api/folders/workspace` 验证真实目录后调用原生 `workspace.create`。沿用手机网关的访问校验，不放开通用 RPC 写接口。网络映射盘、UNC、设备路径和凭据目录不可浏览；目录链接校验目标。取消与浏览不创建会话，重复确认有在途锁，未知添加结果需先核对工作区列表。
 
 维护要点：
 
 - `/m/api/rpc` 仅新增 `session.permissions` 和 `session.selectPermission` 两个封装。读取 `session.list` 的 `projections.values.permissions`，写入原生 `POST /api/commands/execute`，载荷为 `{args:{agentId,line:'/permission <preset>',images:[]}}`；检查命令成功与回读状态，不发模型消息，不开放任意命令 RPC。
 - `/m/api/desktop/workspace` 仅接受本机回环、同源 JSON POST，并拒绝转发头。路径来自原生选择器，忽略请求体中的路径；确认存在且为目录后调用 `workspace.create`。单窗口在途，断连/插件卸载取消窗口，不自动重试未知结果。
-- 原生选择器从正在运行的 DSH 入口解析其自带的 `@deepseek-ai/dsh-host-directory-picker-native`；Windows 使用宿主官方 COM 对话框子进程。未改全局 directory-picker 组合。
+- 原生选择器从正在运行的 DSH 入口解析其自带的 `@deepseek-ai/dsh-host-directory-picker-native`（兼容 CLI 入口与 macOS `DeepSeek Harness.app` 打包路径）。未改全局 directory-picker 组合。
 - 桌面脚本只在本机 `/` 注入入口；远程域名、手机和平板不显示。使用现有按钮标签定位；上游 UI 标签更名时需更新锚点。
 
 验证：权限后端 HTTP、前端确认/双击/状态同步、选择器取消/错误/目录验证/访问边界均有测试。真实设备、用户实际选目录后的体验与自动化测试分别验收。

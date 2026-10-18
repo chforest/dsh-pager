@@ -5,12 +5,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { taskDataDir } from './user-data.mjs'
 import {isPeriodic,periodicProof} from './periodic.mjs'
+import {pluginTag,pluginSource,taskRecordType,eventsOf} from './sdk-compat.mjs'
+import {createHostRpc,nativeHostDependencies} from '../plugin/host-compat.mjs'
+import {authorizeHostOwner} from '../plugin/host-http.mjs'
 import { trusted, canonicalTrustedHost } from '../plugin/server.js'
 import { registerTaskTools } from './tools.mjs?source-chat-v1'
 import { createTaskService } from './service.mjs?periodic-v5'
 
 export const name = 'tasks'
-export const inject = ['webServer', 'agents', 'goals', 'sessions', 'permissionPresets', 'tools', 'systemPrompt']
+export const inject = [...new Set(['webServer', 'agents', 'goals', 'sessions', 'permissionPresets', 'tools', 'systemPrompt',...nativeHostDependencies()])]
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }) }
 const ref = goal => ({ id: goal.id, revision: goal.revision })
 const textOf = message => (message?.content || []).filter(p => p.type === 'text').map(p => p.text).join('\n')
@@ -21,6 +24,7 @@ export const goalObjective = task => task.objective + '\n\n执行要求（仅在
 // our two existing persisted names in its shared vocabulary; never rewrite logs
 // or relax the persistence guard for any other unknown event.
 export function registerTaskEventCompatibility(sessionModule) {
+  if (sessionModule.SESSION_FORMAT_VERSION >= 4 && typeof sessionModule.appendPluginRecord === 'function') return
   const known = sessionModule.KNOWN_SESSION_EVENT_TYPES
   if (!(known instanceof Set)) throw new Error('宿主会话事件兼容接口不可用，自动任务未启动')
   known.add('automatic-task/start')
@@ -30,10 +34,12 @@ function validTaskMarker(event) {
   const data = event?.data
   return data && typeof data.runId === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(data.runId)
     && data.sourceTag === 'dsh-tasks/' + data.runId
-    && (event.type !== 'automatic-task/goal' || typeof data.goalId === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(data.goalId))
+    && (taskRecordType(event) !== 'automatic-task/goal' || typeof data.goalId === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(data.goalId))
 }
 
-export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
+export function createNativeAdapter(ctx, { rpc, createUserMessage, sessionModule }) {
+  const modern = sessionModule?.SESSION_FORMAT_VERSION >= 4
+  const appendMarker = (session,type,data) => modern ? sessionModule.appendPluginRecord(session,'plugin:dsh-tasks/'+type,data) : session.append('automatic-task/'+type,data)
   const occupancyCache = new Map()
   const runBoundaries = new Map()
   // Session.events is a fresh frozen array after append, not a mutable log.
@@ -76,11 +82,11 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
   function idle(agent) {
     const goal = ctx.goals.get(agent)
     const approvals = new Set()
-    for (const event of agent.session.events || []) { if (event.type === 'approval/asked') approvals.add(event.data.id); else if (event.type === 'approval/decided') approvals.delete(event.data.id) }
+    for (const event of eventsOf(agent.session) || []) { if (event.type === 'approval/asked') approvals.add(event.data.id); else if (event.type === 'approval/decided') approvals.delete(event.data.id) }
     return agent.status === 'idle' && !agent.inbox?.hasPending && !approvals.size && (!goal || goal.phase === 'complete')
   }
   function bounds(agent, run) {
-    const events = agent.session.events || []
+    const events = eventsOf(agent.session) || []
     const identity = JSON.stringify([run.id,run.sourceTag,run.eventStartSeq,!!run.inSourceSession])
     const cached = runBoundaries.get(run.id)
     const reusable = cached?.identity === identity && appendedSnapshot(agent.session,events,cached.boundary)
@@ -90,21 +96,21 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
       // prepare records the previous tail. An empty log uses zero; if its
       // first event is our marker, include it rather than skipping seq zero.
       const anchor=events[run.eventStartSeq]
-      scanFrom=anchor.type==='automatic-task/start'&&anchor.data?.runId===run.id ? run.eventStartSeq : run.eventStartSeq+1
+      scanFrom=taskRecordType(anchor)==='automatic-task/start'&&anchor.data?.runId===run.id ? run.eventStartSeq : run.eventStartSeq+1
     }
     const runStart = reusable ? cached.runStart : scanFrom
     for(let i=scanFrom;i<events.length;i++) {
       const e=events[i]
-      if ((e.type==='automatic-task/start'||e.type==='automatic-task/goal')&&!validTaskMarker(e)) fail('自动任务事件归属数据无效，请核对原聊天',409)
-      if(markerIndex<0&&e.type==='automatic-task/start'&&e.data?.sourceTag===run.sourceTag&&e.data?.runId===run.id)markerIndex=i
+      if ((taskRecordType(e)==='automatic-task/start'||taskRecordType(e)==='automatic-task/goal')&&!validTaskMarker(e)) fail('自动任务事件归属数据无效，请核对原聊天',409)
+      if(markerIndex<0&&taskRecordType(e)==='automatic-task/start'&&e.data?.sourceTag===run.sourceTag&&e.data?.runId===run.id)markerIndex=i
     }
     runBoundaries.delete(run.id)
     runBoundaries.set(run.id,{identity,markerIndex,runStart,boundary:snapshotBoundary(agent.session,events)})
     while(runBoundaries.size>128)runBoundaries.delete(runBoundaries.keys().next().value)
     const after = markerIndex>=0 ? events.slice(markerIndex+1) : run.inSourceSession ? [] : events.slice(runStart)
-    const binding = after.find(e => e.type === 'automatic-task/goal' && e.data?.sourceTag === run.sourceTag && e.data?.runId === run.id)
+    const binding = after.find(e => taskRecordType(e) === 'automatic-task/goal' && e.data?.sourceTag === run.sourceTag && e.data?.runId === run.id)
     const goalId = run.goal?.id || binding?.data?.goalId
-    const matches = message => message?.source?.kind === 'plugin' && message.source.plugin === run.sourceTag || goalId && message?.source?.kind === 'goal' && message.source.goalId === goalId
+    const matches = message => pluginTag(message?.source) === run.sourceTag || goalId && message?.source?.kind === 'goal' && message.source.goalId === goalId
     const message = after.find(e => e.type === 'user/message' && matches(eventMessage(e)))
     let start
     if(message)for(let i=after.indexOf(message)-1;i>=0;i--)if(after[i].type==='turn/start'){start=after[i];break}
@@ -155,7 +161,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
     const identity = JSON.stringify([run.id,run.stage,run.status,run.restartRecovery?.status,run.goal?.id,run.sourceTag,!!run.inSourceSession,!!task.continuous,!!task.enabled,!!task.archived,!!task.manualPause,task.status])
     if (suppressed && agent) {
       owned(task, run)
-      const events = agent.session.events || [], goal = ctx.goals.get(agent)
+      const events = eventsOf(agent.session) || [], goal = ctx.goals.get(agent)
       cacheKey = JSON.stringify([events.length, events.at(-1)?.seq, goal?.id, goal?.revision, goal?.phase, goal?.activation, agent.status, !!agent.inbox?.hasPending, run.id, run.stage, run.status, !!run.running, run.restartRecovery?.status, run.goal?.id, run.sourceTag, !!run.inSourceSession, !!task.continuous, !!task.enabled, !!task.archived, !!task.manualPause, task.status])
       const cached = occupancyCache.get(run.id)
       if (cached?.agent === agent && appendedSnapshot(agent.session, events, cached.boundary) && cached.key === cacheKey) {
@@ -169,7 +175,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
           if (event.type === 'turn/start') { openTurn=true; foreignTurn=false }
           if (event.type === 'user/message') {
             const source=eventMessage(event)?.source
-            if (!openTurn || !source || source.kind === 'plugin' && source.plugin === run.sourceTag || run.goal?.id && source.kind === 'goal' && source.goalId === run.goal.id) { safe=false; break }
+            if (!openTurn || !source || pluginTag(source) === run.sourceTag || run.goal?.id && source.kind === 'goal' && source.goalId === run.goal.id) { safe=false; break }
             foreignTurn=true
           }
           if (event.type === 'goal/change' && run.goal?.id && event.data?.goal?.id === run.goal.id) { safe=false; break }
@@ -187,7 +193,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
     if (!suppressed) {
       if (isPeriodic(task) && view.status==='blocked') {
         const bound=bounds(agent,run),approvals=new Set()
-        for(const e of agent.session.events||[]){if(e.type==='approval/asked')approvals.add(e.data.id);else if(e.type==='approval/decided')approvals.delete(e.data.id)}
+        for(const e of eventsOf(agent.session)||[]){if(e.type==='approval/asked')approvals.add(e.data.id);else if(e.type==='approval/decided')approvals.delete(e.data.id)}
         return {...view,periodicSettlement:periodicProof({task,run,goal:ctx.goals.get(agent),agent,events:bound.ownedEvents,approvals:approvals.size})}
       }
       return view
@@ -197,14 +203,14 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
     if (agent && run.stage === 'accepted' && run.status !== 'unknown' && !['unknown','dispatching'].includes(run.restartRecovery?.status)) {
       owned(task, run)
       const goal = ctx.goals.get(agent), bound = bounds(agent, run), approvals = new Set()
-      for (const event of agent.session.events || []) {
+      for (const event of eventsOf(agent.session) || []) {
         if (event.type === 'approval/asked') approvals.add(event.data.id)
         else if (event.type === 'approval/decided') approvals.delete(event.data.id)
       }
       const runEvents = task.continuous ? bound.ownedEvents : bound.message ? bound.after.filter(event => event.seq >= bound.message.seq && (!bound.end || event.seq <= bound.end.seq)) : []
       const uncertain = runEvents.some(event => event.type === 'tool/result' && JSON.stringify(event.data).includes('TOOL_OUTCOME_UNKNOWN'))
       stopped = agent.status === 'idle' && !agent.inbox?.hasPending && !approvals.size && !uncertain && (!goal || goal.activation === 'disarmed')
-      const events = agent.session.events || [], previous = priorOccupancy?.proof
+      const events = eventsOf(agent.session) || [], previous = priorOccupancy?.proof
       if (stopped) stoppedProof = { agent, ...snapshotBoundary(agent.session,events) }
       else if (previous && previous.agent === agent && appendedSnapshot(agent.session,events,previous) && !uncertain && !bound.openOwned && (!goal || bound.goalId && goal.id !== bound.goalId)) {
         // A later, explicitly unrelated turn must not resurrect this archived
@@ -223,7 +229,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
     if (agent && cacheKey) {
       const snapshot = structuredClone({ ...result, todos: Array.isArray(result.todos) ? result.todos.slice(0, 100) : [] })
       occupancyCache.delete(run.id)
-      occupancyCache.set(run.id, { agent, boundary:snapshotBoundary(agent.session,agent.session.events), key: cacheKey, identity, view: snapshot, proof: stoppedProof, observedLength:agent.session.events.length,foreignTurn:false,openTurn:false })
+      occupancyCache.set(run.id, { agent, boundary:snapshotBoundary(agent.session,eventsOf(agent.session)), key: cacheKey, identity, view: snapshot, proof: stoppedProof, observedLength:eventsOf(agent.session).length,foreignTurn:false,openTurn:false })
       while (occupancyCache.size > 128) occupancyCache.delete(occupancyCache.keys().next().value)
     }
     return result
@@ -235,7 +241,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
     const view=await inspect(task,run)
     if(view.status==='complete')return {...view,resumable:false}
     const approvals=new Set()
-    for(const e of agent.session.events){if(e.type==='approval/asked')approvals.add(e.data.id);else if(e.type==='approval/decided')approvals.delete(e.data.id)}
+    for(const e of eventsOf(agent.session)){if(e.type==='approval/asked')approvals.add(e.data.id);else if(e.type==='approval/decided')approvals.delete(e.data.id)}
     if(approvals.size)return {...no('原聊天存在待处理审批'),status:'waiting-user'}
     if(!task.continuous)return no('单次任务中断后需在原聊天核对结果，不自动重放')
     const goal=ctx.goals.get(agent)
@@ -265,7 +271,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
       return idle(await load(task, run))
     },
     async diagnostics(task, run) {
-      const agent = ctx.agents.get(run.sessionId), event = [...(agent?.session.events || [])].reverse().find(e => e.type === 'assistant/message')
+      const agent = ctx.agents.get(run.sessionId), event = [...(eventsOf(agent?.session) || [])].reverse().find(e => e.type === 'assistant/message')
       const result = { live: !!agent, agentStatus: agent?.status || null, sourceTagMatches: run.sourceTag === 'dsh-tasks/' + run.id, cwdMatches: !agent?.session.header?.cwd || path.resolve(agent.session.header.cwd) === path.resolve(task.context.workspacePath), lastAssistantSeq: event?.seq ?? null, lastAssistantDataKeys: Object.keys(event?.data || {}), candidateSummaryLength: textOf(eventMessage(event)).length }
       try { const view = await inspect(task, run); return { ...result, inspectStatus: view.status, occupancyConfirmedStopped: view.occupancyConfirmedStopped === true, inspectRunning: !!view.running, inspectSummaryLength: view.summary?.length || 0 } } catch (error) { return { ...result, inspectError: String(error.message || 'inspect failed').slice(0, 200) } }
     },
@@ -293,31 +299,32 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
       if (run.inSourceSession) {
         if (!idle(agent)) throw busyError()
         await flush(agent.session)
-        return { eventStartSeq: agent.session.events.at(-1)?.seq ?? 0 }
+        return { eventStartSeq: eventsOf(agent.session).at(-1)?.seq ?? 0 }
       }
       await rpc('session.rename', { sessionId: run.sessionId, title: '自动任务 · ' + task.title })
       if (task.context.model) await rpc('session.selectModel', { sessionId: run.sessionId, ...task.context.model })
       ctx.permissionPresets.resolve(task.permissionPreset)
       ctx.permissionPresets.set(agent.session, task.permissionPreset)
-      if (ctx.permissionPresets.current(agent.session.events) !== task.permissionPreset) fail('任务权限设置未生效', 409)
+      if (ctx.permissionPresets.current(modern ? agent.session : eventsOf(agent.session)) !== task.permissionPreset) fail('任务权限设置未生效', 409)
       await flush(agent.session)
-      return { eventStartSeq: agent.session.events.at(-1)?.seq ?? 0 }
+      return { eventStartSeq: eventsOf(agent.session).at(-1)?.seq ?? 0 }
     },
     async dispatch(task, run) {
       const agent = owned(task, run)
       if (run.inSourceSession && !idle(agent)) throw busyError()
-      if (agent.session.events.some(e => e.type === 'automatic-task/start' && e.data?.sourceTag === run.sourceTag)) fail('本次任务已派发或结果未知，不能重复执行', 409)
-      agent.session.append('automatic-task/start', { runId: run.id, sourceTag: run.sourceTag })
+      if (eventsOf(agent.session).some(e => taskRecordType(e) === 'automatic-task/start' && e.data?.sourceTag === run.sourceTag)) fail('本次任务已派发或结果未知，不能重复执行', 409)
+      appendMarker(agent.session,'start', { runId: run.id, sourceTag: run.sourceTag })
       if (task.continuous) {
         const goal = ctx.goals.create(agent, { objective: `自动任务：${task.title}\n运行标记：${run.sourceTag}\n${goalObjective(task)}`, maxGoalRounds: task.maxGoalRounds })
-        agent.session.append('automatic-task/goal', { runId: run.id, sourceTag: run.sourceTag, goalId: goal.id })
+        appendMarker(agent.session,'goal', { runId: run.id, sourceTag: run.sourceTag, goalId: goal.id })
         await flush(agent.session)
         return { goal, running: true }
       }
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: `这是用户已创建的自动任务，本次仅执行一次，继续遵守当前权限和审批边界。\n任务：${task.title}\n${task.objective}` }], source: { kind: 'plugin', plugin: run.sourceTag } }))
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: `这是用户已创建的自动任务，本次仅执行一次，继续遵守当前权限和审批边界。\n任务：${task.title}\n${task.objective}` }], source: pluginSource(run.sourceTag,modern) }))
       await flush(agent.session)
       return { running: true }
     },
+    currentPermission: session => ctx.permissionPresets.current(modern ? session : eventsOf(session)),
     inspect,
     async prepareNextOccurrence(task,run) {
       const view=await inspect(task,run)
@@ -325,7 +332,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
       const agent=owned(task,run),goal=ctx.goals.get(agent),expected=run.periodicSettlement?.goalRef
       if(!expected||goal?.id!==expected.id||goal?.revision!==expected.revision||agent.status!=='idle'||agent.inbox?.hasPending)return{ready:false,reason:'原目标已变化，请人工核对'}
       const approvals=new Set(),bound=bounds(agent,run)
-      for(const e of agent.session.events||[]){if(e.type==='approval/asked')approvals.add(e.data.id);else if(e.type==='approval/decided')approvals.delete(e.data.id)}
+      for(const e of eventsOf(agent.session)||[]){if(e.type==='approval/asked')approvals.add(e.data.id);else if(e.type==='approval/decided')approvals.delete(e.data.id)}
       const current=periodicProof({task,run,goal,agent,events:bound.ownedEvents,approvals:approvals.size})
       if(!current.eligible)return{ready:false,reason:current.reason}
       ctx.goals.clear(agent,ref(goal));await flush(agent.session)
@@ -339,7 +346,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
       if (!agent || view.occupancyConfirmedStopped !== true || agent.status !== 'idle' || agent.inbox?.hasPending) return { cleanup:'not-stopped' }
       owned(task,run)
       const goal=ctx.goals.get(agent),bound=bounds(agent,run),goalId=bound.goalId,approvals=new Set()
-      for(const event of agent.session.events||[]) { if(event.type==='approval/asked')approvals.add(event.data.id);else if(event.type==='approval/decided')approvals.delete(event.data.id) }
+      for(const event of eventsOf(agent.session)||[]) { if(event.type==='approval/asked')approvals.add(event.data.id);else if(event.type==='approval/decided')approvals.delete(event.data.id) }
       const runEvents=task.continuous?bound.ownedEvents:bound.message?bound.after.filter(event=>event.seq>=bound.message.seq&&(!bound.end||event.seq<=bound.end.seq)):[]
       if(approvals.size||runEvents.some(event=>event.type==='tool/result'&&JSON.stringify(event.data).includes('TOOL_OUTCOME_UNKNOWN')))return{cleanup:'unconfirmed'}
       if (goal && goal.id !== goalId) return { running:false,goalCleared:false,cleanup:'different-goal' }
@@ -356,7 +363,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
       owned(task, run)
       const goal = ctx.goals.get(agent)
       const bound = bounds(agent, run)
-      const lastUser = [...(agent.session.events || [])].reverse().find(e => e.type === 'user/message')
+      const lastUser = [...(eventsOf(agent.session) || [])].reverse().find(e => e.type === 'user/message')
       const safeToPause = agent.status === 'idle' || !agent.inbox?.hasPending && lastUser && bound.matches(eventMessage(lastUser))
       if (task.continuous && goal?.id === bound.goalId && goal?.phase === 'active' && safeToPause) ctx.goals.pause(agent, ref(goal))
       else if (!task.continuous && agent.status === 'running' && bound.message && !bound.end && !agent.inbox?.hasPending && !bound.after.some(e => e.type === 'user/message' && !bound.matches(eventMessage(e)))) agent.cancel({ kind: 'user' }, { keepInbox: true })
@@ -396,9 +403,11 @@ function readJson(req) {
     req.on('error', reject)
   })
 }
-export function createTasksHandler(service, adapter, trustedHosts = []) {
+export function createTasksHandler(service, adapter, trustedHosts = [], authorize = () => undefined) {
   return async (req, res) => {
     const reply = (status, body) => { if (res.headersSent) return; const data = JSON.stringify(body); res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(data) }
+    const denied=authorize(req)
+    if(denied){reply(denied,{ok:false,error:{message:'需要宿主所有者身份'}});return}
     if (!trusted(req, trustedHosts)) { reply(403, { ok: false, error: { message: '请求来源不受信任' } }); return }
     try {
       if (req.method === 'GET') {
@@ -416,22 +425,19 @@ export function createTasksHandler(service, adapter, trustedHosts = []) {
 export async function apply(ctx, config = {}) {
   const trustedHosts = config.trustedHosts || []
   if (!Array.isArray(trustedHosts) || trustedHosts.some(host => canonicalTrustedHost(host) === null)) throw Error('tasks trustedHosts must be host authorities')
-  const fromHost = createRequire(path.resolve(process.argv[1]))
+  const fromHost={resolve:spec=>{for(const c of [process.argv[1]&&!process.argv[1].startsWith('-')?path.resolve(process.argv[1]):null,import.meta.url,'/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/package.json'].filter(Boolean)){try{return createRequire(c).resolve(spec)}catch{}}return createRequire(import.meta.url).resolve(spec)}}
   // Resolve from the running host, not this plugin's dependency tree: the
   // persistence coordinator must see this exact same module singleton Set.
-  registerTaskEventCompatibility(await import(pathToFileURL(fromHost.resolve('@deepseek-ai/dsh-session')).href))
+  const sessionModule = await import(pathToFileURL(fromHost.resolve('@deepseek-ai/dsh-session')).href)
+  registerTaskEventCompatibility(sessionModule)
   const { createUserMessage } = await import(pathToFileURL(fromHost.resolve('@deepseek-ai/dsh-llm')).href)
   const { defineTool } = await import(pathToFileURL(fromHost.resolve('@deepseek-ai/dsh-tools')).href)
-  async function rpc(method, payload) {
-    const response = await fetch(`http://127.0.0.1:${ctx.webServer.port}/api/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method, payload }), signal: AbortSignal.timeout(45000) })
-    const data = await response.json()
-    if (!response.ok || !data.result?.ok) throw Error(data.result?.error?.message || 'DSH API failed')
-    return data.result.value
-  }
-  const adapter = createNativeAdapter(ctx, { rpc, createUserMessage })
+  const hostRpc=createHostRpc(ctx)
+  const rpc=(method,payload)=>hostRpc(method,payload,45000)
+  const adapter = createNativeAdapter(ctx, { rpc, createUserMessage, sessionModule })
   const service = createTaskService({ dir: taskDataDir(config), adapter, maxActive: config.maxActive ?? 2, startupContext:()=>globalThis[Symbol.for('dsh.recovery.startup')] })
   registerTaskTools(ctx, { service, adapter, defineTool })
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/m/api/tasks', handler: createTasksHandler(service, adapter, trustedHosts) }), 'tasks HTTP')
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/m/api/tasks', handler: createTasksHandler(service, adapter, trustedHosts,req=>authorizeHostOwner(ctx,req)) }), 'tasks HTTP')
   ctx.effect(() => () => service.close(), 'tasks shutdown')
   service.start()
 }

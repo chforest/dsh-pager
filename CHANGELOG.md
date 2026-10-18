@@ -1,3 +1,13 @@
+# 1.6.2 — 2026-10-19
+
+- **苹果生态（macOS 宿主 + iPhone / iPad）全面适配打通**：
+  - **macOS 宿主原生能力**：区域截图支持 `/usr/sbin/screencapture` 交互框选与 Apple Vision（`RecognizeText.swift`）本地离线中英 OCR 及翻译；桌面文件右键菜单支持访达（Finder）定位（`open -R`）、文本编辑（TextEdit）、VS Code / Cursor、AppleScript 原生“打开方式”与“另存为”、QuickTime Player 视频打开；手机端远程浏览电脑目录支持 macOS 主目录、桌面、文稿、下载与 `/Volumes` 磁盘卷；语音扩展支持 Apple Silicon (ARM64) 原生加速与静音/标点门控。
+  - **iPhone / iPad 全屏 Web App 体验对齐**：完善 Safari 添加到主屏幕后的全屏 Web App、Web Push 端到端加密锁屏提醒、三种语音模式（录音转文字、语音消息、实时语音通话）、智能灰字回复建议与 macOS 桌面端实时双向同步。
+- **运行中发送消息的「修改 / 引导 / 等待」三项选择**：
+  - 当 DSH 正在运行时，无论在手机端（`/m/`）还是桌面端（`/`）发送文字或语音消息，消息均先进入输入框上方的待发栏（QueueDock），直观提供 **修改**（编辑内容）、**引导**（立即作为插话送入当前运行回合）、**等待**（保持排队等当前回合完成后自动发送）三项选择（以及删除）；仅实时语音通话（`call`）保持直接插话。
+- **DeepSeek Harness 0.2.1 宿主兼容与智能建议加固**：
+  - 新增 `host-compat.mjs`、`native-responses.mjs`、`sdk-compat.mjs`，兼容 DSH 0.2.1 原生 Controller/SDK 与旧版 0.1.1-rc.2；智能回复建议（`dsh-suggestions`）支持多候选模型自动回退与更高首包超时预算，避免高负载下灰字建议偶发空白。
+
 # 1.6.1 — 2026-10-18
 
 - 桌面文件右键提供打开、VS Code、打开方式、另存为、复制路径、复制内容、资源管理器定位七项；Windows 原生窗口和操作回执，二进制文件不提供复制文本内容。

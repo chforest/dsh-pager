@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -7,8 +8,10 @@ import { spawn } from 'node:child_process'
 const source = fileURLToPath(new URL('./screenshot/RegionCapture.cs', import.meta.url))
 const MAX_OUTPUT = 45 * 1024 * 1024
 const error = (message, code = 'screenshot-failed') => Object.assign(new Error(message), { code })
+
 export async function ensureScreenshotExecutable() {
-  if (process.platform !== 'win32') throw error('截图仅支持 Windows 本地桌面', 'unsupported')
+  if (process.platform === 'darwin') return '/usr/sbin/screencapture'
+  if (process.platform !== 'win32') throw error('截图仅支持 Windows 或 macOS 本地桌面', 'unsupported')
   const hash = crypto.createHash('sha256').update('winexe-visible-v2\n').update(fs.readFileSync(source)).digest('hex').slice(0, 20)
   const dir = fileURLToPath(new URL('./.cache/screenshot/', import.meta.url))
   fs.mkdirSync(dir, { recursive: true })
@@ -29,14 +32,49 @@ export async function ensureScreenshotExecutable() {
     return exe
   } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp) }
 }
+
 export function createDesktopRegionCapture({ spawnProcess = spawn, ensureExecutable = ensureScreenshotExecutable, platform = process.platform, timeoutMs = 100000, diagnostic = message => process.stderr.write('[dsh-screenshot] ' + message + '\n') } = {}) {
   let busy = false
   return async function captureDesktopRegion(signal) {
     if (signal?.aborted) return { cancelled: true }
-    if (platform !== 'win32') throw error('截图仅支持 Windows 本地桌面', 'unsupported')
+    if (platform !== 'win32' && platform !== 'darwin') throw error('截图仅支持 Windows 或 macOS 本地桌面', 'unsupported')
     if (busy) throw error('截图窗口已经打开', 'screenshot-busy')
     busy = true
     try {
+      if (platform === 'darwin') {
+        const tempPng = path.join(os.tmpdir(), `dsh-screencapture-${crypto.randomUUID()}.png`)
+        try {
+          return await new Promise((resolve, reject) => {
+            let child, done = false, timer
+            const finish = (err, value) => {
+              if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', abort)
+              if (err) reject(err); else resolve(value)
+            }
+            const abort = () => { child?.kill(); finish(null, { cancelled: true }) }
+            try { child = spawnProcess('/usr/sbin/screencapture', ['-i', '-x', tempPng], { stdio: ['ignore', 'pipe', 'pipe'] }) } catch (e) { finish(e); return }
+            timer = setTimeout(abort, Math.min(120000, Math.max(1, timeoutMs)))
+            signal?.addEventListener('abort', abort, { once: true })
+            if (signal?.aborted) { abort(); return }
+            child.once('error', e => finish(e))
+            child.once('close', code => {
+              if (done) return
+              if (code !== 0 || !fs.existsSync(tempPng)) {
+                finish(null, { cancelled: true })
+                return
+              }
+              try {
+                const data = fs.readFileSync(tempPng)
+                if (data.length > 32 * 1024 * 1024 || data.length < 24 || data.readUInt32BE(0) !== 0x89504e47 || data.readUInt32BE(4) !== 0x0d0a1a0a) throw error('截图PNG校验失败')
+                const width = data.readUInt32BE(16)
+                const height = data.readUInt32BE(20)
+                finish(null, { mime: 'image/png', data: data.toString('base64'), width, height })
+              } catch (e) { finish(e) }
+            })
+          })
+        } finally {
+          try { if (fs.existsSync(tempPng)) fs.unlinkSync(tempPng) } catch {}
+        }
+      }
       const exe = await ensureExecutable()
       if (signal?.aborted) return { cancelled: true }
       return await new Promise((resolve, reject) => {
@@ -47,8 +85,6 @@ export function createDesktopRegionCapture({ spawnProcess = spawn, ensureExecuta
           if (err) reject(err); else resolve(value)
         }
         const abort = () => { child?.kill(); finish(null, { cancelled: true }) }
-        // This is an explicitly requested visible interactive window. A winexe
-        // has no console; SW_HIDE must not hide its first WinForms window.
         try { child = spawnProcess(exe, ['--capture'], { windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] }) } catch (e) { finish(e); return }
         timer = setTimeout(abort, Math.min(120000, Math.max(1, timeoutMs)))
         signal?.addEventListener('abort', abort, { once: true })

@@ -12,8 +12,9 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
   if (!dir || !adapter) fail('任务服务配置不完整')
   if (!Number.isInteger(maxActive) || maxActive < 1 || maxActive > 4) fail('并行任务上限必须为1至4')
   const root = path.resolve(dir), file = path.join(root, 'tasks.json')
+  const canon = p => (process.platform === 'darwin' ? path.resolve(p).replace(/^\/(var|tmp|etc)(?=\/|$)/, '/private/$1') : path.resolve(p)).toLowerCase()
   fs.mkdirSync(root, { recursive: true, mode: 0o700 })
-  if (fs.lstatSync(root).isSymbolicLink() || fs.realpathSync(root).toLowerCase() !== root.toLowerCase()) fail('任务目录不能使用链接', 403)
+  if (fs.lstatSync(root).isSymbolicLink() || fs.realpathSync(root).toLowerCase() !== canon(root)) fail('任务目录不能使用链接', 403)
   let state = { version: 1, tasks: [], requests: [] }, chain = Promise.resolve(), timer = null, closing = false
   const launches = new Set()
   const completedInspections = new Set()

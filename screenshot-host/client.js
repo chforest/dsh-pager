@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({id:'dsh-screenshot',factory:(require)=>{
   }
   async function captureRequest(signal,fetcher=fetch){return brokerRequest('/capture',{},signal,fetcher);}
   function historyChange(marks,redo,action,mark){if(action==='add')return{marks:[...marks,mark],redo:[]};if(action==='undo'&&marks.length)return{marks:marks.slice(0,-1),redo:[...redo,marks.at(-1)]};if(action==='redo'&&redo.length)return{marks:[...marks,redo.at(-1)],redo:redo.slice(0,-1)};return{marks,redo};}
-  function addTextDraft(actions,draft,value,current){if(!current()||!value.trim()||typeof actions?.setDraft!=='function')return false;actions.setDraft(draft+(draft&&!draft.endsWith('\n')?'\n':'')+value);return true;}
+  function addTextDraft(actions,draft,value,current){if(!current()||!value.trim())return false;if(typeof actions?.captureInsertion==='function'&&typeof actions?.insertText==='function'){const span=actions.captureInsertion();return current()&&actions.insertText(value,span)!==false;}if(typeof actions?.setDraft!=='function')return false;actions.setDraft(draft+(draft&&!draft.endsWith('\n')?'\n':'')+value);return true;}
   function canvasImage(canvas){return{mime:'image/png',data:canvas.toDataURL('image/png').split(',')[1],width:canvas.width,height:canvas.height};}
   function resultCurrent(owner,state){return state.live&&state.sid===owner.sid&&state.generation===owner.token&&state.request===owner.request&&state.revision===owner.revision;}
   async function translationPipeline({text,image,target,sessionId,signal,current,request=brokerRequest,onStage=()=>{}}){
@@ -57,11 +57,13 @@ window.__ModuleLoader__.load({id:'dsh-screenshot',factory:(require)=>{
     }
     ctx.restore();
   }
-  function addScreenshotDraft(conversation,actions,file,stillCurrent){
+  function addScreenshotDraft(conversation,actions,file,stillCurrent,sessionId){
     if(!stillCurrent())return false;
-    const images=conversation.createDraftImages([file]);
-    try{if(!stillCurrent()||actions.addImages(images.map(image=>image.id))===false){conversation.releaseDraftImages(images);return false;}return true;}
-    catch(error){conversation.releaseDraftImages(images);throw error;}
+    const modern=typeof conversation.createDrafts==='function';if(modern&&!sessionId)return false;
+    const images=modern?conversation.createDrafts(sessionId,[file]):conversation.createDraftImages([file]);
+    const release=()=>modern?conversation.releaseDraftAttachments(images):conversation.releaseDraftImages(images);
+    try{if(!stillCurrent()||(actions.addAttachments||actions.addImages).call(actions,images.map(image=>image.id))===false){release();return false;}return true;}
+    catch(error){release();throw error;}
   }
   function ScreenshotButton({sessionId,inputActions,conversation,useInput}){
     const [busy,setBusy]=React.useState(false),[shot,setShot]=React.useState(null),[marks,setMarks]=React.useState([]),[tool,setTool]=React.useState('rect'),[text,setText]=React.useState(''),[error,setError]=React.useState('');
@@ -133,7 +135,7 @@ window.__ModuleLoader__.load({id:'dsh-screenshot',factory:(require)=>{
       const current=()=>live.current&&sidRef.current===owned.sid&&generation.current===owned.token;
       try{paint();const blob=await new Promise(resolve=>canvasRef.current.toBlob(resolve,'image/png'));if(!current())return;if(!blob)throw new Error('截图导出失败');
         const file=new File([blob],'DSH截图-'+new Date().toISOString().replace(/[:.]/g,'-')+'.png',{type:'image/png'});
-        if(!addScreenshotDraft(conversation,actions,file,current))throw new Error('当前输入框暂不能添加图片，请稍后重试');cancel();
+        if(!addScreenshotDraft(conversation,actions,file,current,owned.sid))throw new Error('当前输入框暂不能添加图片，请稍后重试');cancel();
       }catch(cause){if(current())setError(cause.message);}finally{if(current()){lock.current=false;setBusy(false);}}
     }
     if(!sessionId||!allowedEnvironment())return null;

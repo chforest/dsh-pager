@@ -85,7 +85,13 @@ export function createNativeCallAsr({ modelDir, files, fallback, resetFallback, 
             const response = await rpc({ op: 'feed', sessionId, epoch, offset: state.nativeFed, samples: state.pcm.slice(state.nativeFed, state.count), final: !!final });
             if (!current(state)) throw cancelled(); state.nativeFed = state.count;
             report(sessionId, 'native-asr-result', { durationMs: Date.now() - start, decodeMs: response.decodeMs ?? -1, final: !!final });
-            if (!final || response.text?.trim()) return response;
+            const rawT = String(response.text ?? "").replace(/\s+\.\s*$/, "").trim();
+            const cleaned = rawT.replace(/[\s.,????????????????\-???'"???????????)????\[\]????>]/g, "").length > 0 ? rawT : "";
+            if (!final || cleaned) return { ...response, text: cleaned };
+            let sumSq = 0;
+            for (let i = 0; i < state.count; i++) sumSq += state.pcm[i] * state.pcm[i];
+            const rms = state.count > 0 ? Math.sqrt(sumSq / state.count) : 0;
+            if (rms < 0.015) return { text: "", endpoint: false };
             state.forceSense = true;
           } catch (error) { if (!current(state) || error.code === 'cancelled') throw cancelled(); }
           state.backend = 'fallback'; resetFallback?.(sessionId);

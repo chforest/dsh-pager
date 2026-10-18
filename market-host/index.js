@@ -3,9 +3,10 @@ import path from 'node:path'
 import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { trusted } from '../plugin/server.js'
+import {authorizeHostOwner,createHostFetch} from '../plugin/host-http.mjs'
 
 export const name = 'mobile-market'
-export const inject = ['webServer']
+export const inject = ['webServer','connection']
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 function postOnce(port, url) {
   return new Promise((resolve, reject) => {
@@ -56,10 +57,15 @@ export function createInstaller({ dir, port, send = postOnce }) {
   return { start, read, settle: async () => Promise.allSettled([...pending.values()]) }
 }
 export function apply(ctx, config) {
-  const installer = createInstaller({ dir: config?.dir || fileURLToPath(new URL('./receipts/', import.meta.url)), port: () => ctx.webServer.port })
+  const hostFetch=createHostFetch(ctx)
+  const installer = createInstaller({ dir: config?.dir || fileURLToPath(new URL('./receipts/', import.meta.url)), port: () => ctx.webServer.port,send:async(port,url)=>{
+    const response=await hostFetch(`http://127.0.0.1:${port}/dsh-market/install`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url}),signal:AbortSignal.timeout(300000)})
+    return{status:response.status,body:await response.json()}
+  } })
   const respond = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)) }
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/m/market-install', handler: async (req, res) => {
     if (!trusted(req, config?.trustedHosts || [])) return respond(res, 403, { error: '请求来源不可信' })
+    const denied=authorizeHostOwner(ctx,req);if(denied)return respond(res,denied,{error:'需要已登录的本机所有者会话'})
     try {
       if (req.method === 'GET') return respond(res, 200, installer.read(new URL(req.url, 'http://localhost').searchParams.get('id') || ''))
       if (req.method !== 'POST') return respond(res, 405, { error: '仅支持 GET / POST' })

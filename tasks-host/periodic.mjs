@@ -13,7 +13,9 @@ export function periodicProof({task,run,goal,agent,events,approvals}) {
     if(e.type==='tool/call'){if(!e.data?.callId)return no('工具调用缺少编号');calls.set(e.data.callId,e.data.name)}
     if(e.type==='tool/result'){
       const m=e.data?.message,id=m?.source?.callId
-      if(m?.source?.kind!=='tool'||typeof id!=='string'||!id||m.content?.length!==1||m.content[0]?.type!=='tool-result'||m.content[0]?.toolCallId!==id)return no('工具结果缺少一致的原生关联编号')
+      const nativeV4=m?.role==='tool'&&m.toolCallId===id&&Array.isArray(m.content)
+      const nativeV3=m?.role==='user'&&m.content?.length===1&&m.content[0]?.type==='tool-result'&&m.content[0]?.toolCallId===id
+      if(m?.source?.kind!=='tool'||typeof id!=='string'||!id||(!nativeV4&&!nativeV3))return no('工具结果缺少一致的原生关联编号')
       if(/transport|timeout|unknown|abort|cancel/i.test(e.data?.error?.code||''))return no('工具结果未确认')
       const text=JSON.stringify(m.content||[]);if(/TOOL_OUTCOME_UNKNOWN|TRANSPORT_ERROR/.test(text))return no('工具结果未确认')
       results.set(id,m)

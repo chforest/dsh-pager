@@ -3970,7 +3970,7 @@ async function voiceStoreMessage(item) {
 var voiceReplyOwners = new Map();
 var voiceReplyOwnersByRequest = new Map();
 async function voicePrompt(item) {
-  const response = await fetch('/m/api/rpc', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({method:'session.prompt',rpcId:item.requestId,payload:{sessionId:item.s,mode:item.mode==='call'?'steer':'queue',content:[{type:'text',text:item.text}],clientTimeZone:Intl.DateTimeFormat().resolvedOptions().timeZone}}),signal:AbortSignal.timeout(30000)});
+  const response = await fetch('/m/api/rpc', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({method:'session.prompt',rpcId:item.requestId,payload:{sessionId:item.s,mode:item?.mode==='call'?'steer':'queue',content:[{type:'text',text:item.text}],clientTimeZone:Intl.DateTimeFormat().resolvedOptions().timeZone}}),signal:AbortSignal.timeout(30000)});
   const receipt = await response.json();
   if (!response.ok || !receipt.ok) throw new Error(receipt.error?.message || '发送未确认');
   return receipt.value;
@@ -4018,11 +4018,11 @@ function createVoiceQueue(entries) {
 }
 function voiceTextNodes(target,binding){
   if(binding.item.mode==='call'||!binding.voiceRequestId||binding.voiceRequestId!==binding.item.requestId)return [];
-  if(binding.item.role==='user')return [...target.querySelectorAll('.gdEzaW_bubble')];
+  if(binding.item.role==='user')return [...target.querySelectorAll('.gdEzaW_bubble, .Sixlwa_bubble')];
   const node=binding.node;
   if(!node?.data?.blocks)return [];
   const blocks=node.data.blocks||[];if(blocks.some(b=>!['text','reasoning','tool-call'].includes(b.kind)))return [];
-  const body=target.querySelector('.Sxvs8a_body');if(!body)return [];
+  const body=target.querySelector('.Sxvs8a_body, .hWmORq_body');if(!body)return [];
   const rendered=blocks.filter(b=>b.kind!=='tool-call');if(body.children.length<rendered.length)return [];
   return [...body.children].filter((_,index)=>rendered[index]?.kind==='text');
 }
@@ -4073,8 +4073,12 @@ function watchVisibleVoiceEvents(sessionId,onSaved,onOpen){
   document.addEventListener('visibilitychange',sync);sync();
   return()=>{disposed=true;document.removeEventListener('visibilitychange',sync);if(events){events.close();events=null;}};
 }
-function VoiceInlineMessages({sessionId,useSession,bus,callActive}) {
-  const nodes=useSession ? useSession(s=>s.chat?.nodes) : null;
+function VoiceInlineMessages({sessionId,useSession,useChat,bus,callActive}) {
+  const chat=useChat ? useChat(s=>s) : null;
+  const legacyNodes=!useChat&&useSession ? useSession(s=>s.chat?.nodes) : null;
+  // New ChatNodeStore is a stable keyed reader. Snapshot it when Chat publishes
+  // so streaming text updates also rerun our exact-turn DOM binding effect.
+  const nodes=React.useMemo(()=>chat?new Map([...chat.nodes.values()].map(node=>[node.key,node])):legacyNodes,[chat,legacyNodes]);
   const [items,setItems]=React.useState([]);
   const bindingsRef=React.useRef([]), syncRef=React.useRef(()=>{}),callRef=React.useRef(callActive);
   callRef.current=callActive;
@@ -4141,7 +4145,7 @@ function VoiceConversationDock({ bus, sessionId, kind, active, onHangup, onMute,
     !call && h('button', {type:'button', onClick:()=>void refreshRef.current?.(), style:{margin:'8px 0'}}, '刷新语音记录'),
     call && h('p', {role:'status'}, phoneCallStatus(ui,muted)),
     call && ui.bargeInDetectFallback && h('p', {role:'status'}, '当前设备未启用回声消除；建议戴耳机。自动插话不可用，可点“打断回复”。'),
-    h('div', {style:{overflow:'auto', flex:1, display:'flex', flexDirection:'column', gap:12}}, ...(call ? [] : items).map(item => h('article', {key:item.id, style:{alignSelf:item.role === 'user' ? 'flex-end':'flex-start', maxWidth:'95%', borderRadius:14,padding:10,background:item.role === 'user' ? '#e8edff':'#f2f3f5',color:'#222'}}, h('small',null,item.role === 'user' ? '你':'DSH'), h('audio', {controls:true,preload:'none',src:item.url || '/m/api/voice/audio?s='+encodeURIComponent(sessionId)+'&id='+encodeURIComponent(item.id),style:{display:'block',maxWidth:'100%'}}), h('div',null,item.text))), call && h('p', {'aria-live':'polite'}, ui.partial ? '你：'+ui.partial : ui.playingCaption ? 'DSH：'+ui.playingCaption : '')),
+    h('div', {style:{overflow:'auto', flex:1, display:'flex', flexDirection:'column', gap:12}}, ...(call ? [] : items).map(item => h('article', {key:item.id, style:{alignSelf:item.role === 'user' ? 'flex-end':'flex-start', maxWidth:'95%', borderRadius:14,padding:10,background:item.role === 'user' ? '#e8edff':'#f2f3f5',color:'#222'}}, h('small',null,item.role === 'user' ? '你':'DSH'), h('audio', {controls:true,preload:'none',src:item.url || '/m/api/voice/audio?s='+encodeURIComponent(sessionId)+'&id='+encodeURIComponent(item.id),style:{display:'block',maxWidth:'100%'}}), h('div',null,item.text))), call && h('p', {'aria-live':'polite'}, ui.partial ? '你：'+ui.partial : ui.playingCaption ? 'DSH：'+ui.playingCaption : ui.lastUserText ? '已发送插话：「'+ui.lastUserText+'」' : '')),
     (error || ui.error) && h('p', {role:'alert'}, error || ui.error),
     pending && h('button', {onClick:onRetry}, '录音尚未发送 · 重试保存'),
     failed.length > 0 && h('button',{onClick:async()=>{ for(const item of failed) {try {await voiceStoreMessage(item);voiceUnstoredReplies.delete(item.id);}catch{setError('回复语音仍未保存，请稍后再试');}} window.dispatchEvent(new CustomEvent('dsh-voice-history',{detail:sessionId}));}},'保存未成功的回复语音'),
@@ -4199,16 +4203,16 @@ function phoneCallStatus(ui,muted){
   if(ui.callModelRunning||ui.callPhase==='thinking')return 'DSH 正在思考 · 可继续说补充信息';
   if(ui.ttsBusy)return '正在准备语音回复…';return '通话已接通 · 正在听你说话';
 }
-function voiceEntryError(kind,draft,running){
+function voiceEntryError(kind,draft,_running){
   if(kind==='draft')return null;
   if(String(draft||'').trim())return kind==='call'?'请先处理输入框草稿，再接通电话':'请先处理输入框草稿，再录制语音消息';
-  if(kind==='message'&&running)return '当前任务还在运行，请等待完成后录制语音消息；也可接通电话补充信息';
   return null;
 }
 function MicButton({
   bus,
   sessionId,
   useSession,
+  useChat,
   useInput,
   inputActions
 }) {
@@ -4439,7 +4443,7 @@ function MicButton({
       voiceReplyOwners.set(item.s, owner);
       voiceReplyOwnersByRequest.set(item.requestId, owner);
       pendingVoiceRef.current = null; setPendingVoice(null);
-      if(item.mode==='call')bus.setUi({callPhase:'thinking'});
+      if(item.mode==='call')bus.setUi({callPhase:'thinking',lastUserText:item.text});
       try { await voicePrompt(item); }
       catch (e) { bus.setUi({...(item.mode==='call'?{callPhase:'listening'}:{}),error:"语音已保存，发送结果未确认，请查看对话；不会自动重发："+e.message}); }
     } catch (e) {
@@ -4779,7 +4783,7 @@ function MicButton({
   const toggle = () => {
     if (localRef.current === "on" && voiceKindRef.current === "message") {
       const engine=engineRef.current;if(!engine || voiceSavingRef.current || pendingVoiceRef.current || bus.ui.state === "transcribing")return;
-      if(engine.holding){setHolding(false);engine.endHeld(false);}else{if(runningRef.current || bus.ui.playing){bus.setUi({error:"请等待回复结束再录下一条语音"});return;}engine.beginHeld();setHolding(true);}return;
+      if(engine.holding){setHolding(false);engine.endHeld(false);}else{if(bus.ui.playing)bus.skipAudio();engine.beginHeld();setHolding(true);}return;
     }
     const now = Date.now();
     if (now - toggleGuardRef.current < 2e3) return;
@@ -5164,7 +5168,7 @@ function MicButton({
     engineRef.current?.endHeld(true);
   };
   return React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
-    React.createElement(VoiceInlineMessages, {sessionId,useSession,bus,callActive:voiceKind === "call" && local === "on"}),
+    React.createElement(VoiceInlineMessages, {sessionId,useSession,useChat,bus,callActive:voiceKind === "call" && local === "on"}),
     pendingVoice && voiceKind !== "call" && React.createElement("button", {onClick:()=>void sendSavedVoice(pendingVoiceRef.current)}, "录音尚未发送 · 重试保存"),
     voiceKind === "call" && local === "on" && React.createElement(VoiceConversationDock, { bus, sessionId, kind:voiceKind, active:local === "on", muted, pending:pendingVoice, onRetry:()=>void sendSavedVoice(pendingVoiceRef.current), onHangup:()=>void exitModeRef.current("manual"), onInterrupt:()=>void breakRef.current?.(), onMute:()=>{ callBufferRef.current?.cancel(); captureGenerationRef.current++; mutedRef.current = !mutedRef.current; setMuted(mutedRef.current); engineRef.current?.endHeld(true); void engineRef.current?.discardSegment(); bus.setUi({partial:""}); } }),
     local === "off" ? React.createElement(VoiceModeMenu, {onChoose:(kind)=>{ voiceKindRef.current=kind; setVoiceKind(kind); void enterMode(); }}) : null,
@@ -5188,6 +5192,8 @@ function MicButton({
       ref: btnRef,
       disabled: local === "pending" || (voiceKind === "message" && (busy || !!pendingVoice)),
       "data-dshvm": "mic",
+      "data-voice-kind": voiceKind,
+      "data-voice-recording": (voiceKind === "message" ? holding : on) ? "true" : "false",
       "aria-label": on ? t("ariaActive") : t("ariaEnter"),
       "aria-pressed": on,
       title: on ? holdMode ? t("titleHold") : t("titleToggle") : t("titleEnter"),

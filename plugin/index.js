@@ -15,7 +15,8 @@
 
 import { createMobile } from './server.js?suggestions-v1'
 import fs from 'node:fs'
-import crypto from 'node:crypto'
+import {createNativeResponses} from './native-responses.mjs'
+import {createHostRpc,createHostEvents,createOwnerAuthorizer,hasNativeController,nativeHostDependencies} from './host-compat.mjs'
 import path from 'node:path'
 import {createRequire} from 'node:module'
 import {pathToFileURL} from 'node:url'
@@ -26,7 +27,7 @@ import {createSuggestions,contextFromAgent} from './suggestions.js'
 export const name = 'mobile'
 
 /** Needs the web server for route registration and its bound port. */
-export const inject = ['webServer','llm','agents']
+export const inject = ['webServer','llm','agents',...nativeHostDependencies()]
 
 /**
  * Injected into DSH's own page at `/`: the iPhone / iPad home-screen web app
@@ -47,16 +48,21 @@ export const STANDALONE_TO_M = "(function(){try{if(location.pathname==='/'&&navi
 export async function apply(ctx, config) {
   const trustedHosts = (config && config.trustedHosts) ?? []
   if (!Array.isArray(trustedHosts)) throw new Error('dsh-pager: trustedHosts must be a list of host[:port] strings')
-  const fromHost=createRequire(path.resolve(process.argv[1]))
-  const {createUserMessage}=await import(pathToFileURL(fromHost.resolve('@deepseek-ai/dsh-llm')).href)
-  const modelForSession=async(sessionId,signal)=>{
-    const response=await fetch(`http://127.0.0.1:${ctx.webServer.port}/api/session.models`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:crypto.randomUUID(),method:'session.models',payload:{sessionId}}),signal})
-    const result=await response.json();if(!response.ok||!result.result?.ok)throw Object.assign(new Error('无法读取当前聊天模型，请重新打开对话'),{status:409});return result.result.value
-  }
-  const screenshotTranslate=createScreenshotTranslator({llm:ctx.llm,createUserMessage,modelForSession})
-  const suggestions=createSuggestions({llm:ctx.llm,createUserMessage,modelForSession,loadContext:async(sessionId)=>{if(!ctx.agents.get(sessionId))await modelForSession(sessionId);return contextFromAgent(ctx.agents.get(sessionId))}})
+  const fromHost={resolve:spec=>{for(const c of [process.argv[1]&&!process.argv[1].startsWith('-')?path.resolve(process.argv[1]):null,import.meta.url,'/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/package.json'].filter(Boolean)){try{return createRequire(c).resolve(spec)}catch{}}return createRequire(import.meta.url).resolve(spec)}}
+  const {createUserMessage,assistantStreamChunks}=await import(pathToFileURL(fromHost.resolve('@deepseek-ai/dsh-llm')).href)
+  const hostRpc=createHostRpc(ctx,{assistantStreamChunks}), native=hasNativeController(ctx)
+  const responses=native?createNativeResponses(ctx):null, events=createHostEvents(ctx,{assistantStreamChunks})
+  const nativeStreams=events?listeners=>{const stopEvents=events(listeners),stopResponses=responses.subscribe(listeners);return()=>{stopResponses();stopEvents()}}:undefined
+  if(responses)ctx.effect(()=>()=>responses.close(),'mobile native responses close')
+  const modelForSession=(sessionId,signal)=>hostRpc('session.models',{sessionId},{signal})
+  const screenshotTranslate=createScreenshotTranslator({llm:ctx.llm,createUserMessage,modelForSession,source:native?{kind:'plugin:screenshot-translate'}:{kind:'plugin',plugin:'screenshot-translate'}})
+  const suggestions=createSuggestions({llm:ctx.llm,createUserMessage,modelForSession,source:native?{kind:'plugin:input-suggestion'}:{kind:'plugin',plugin:'input-suggestion'},loadContext:async(sessionId)=>{if(!ctx.agents.get(sessionId))await modelForSession(sessionId);return contextFromAgent(ctx.agents.get(sessionId),{assistantStreamChunks})}})
   ctx.effect(()=>()=>suggestions.close(),'input suggestions close')
   const mobile = createMobile({
+    hostRpc,
+    authorizeRequest:createOwnerAuthorizer(ctx),
+    nativeStreams,
+    nativeRespond:responses?.respond,
     screenshotTranslate,
     suggestionProvider:suggestions.get,
     apiPort: () => ctx.webServer.port,

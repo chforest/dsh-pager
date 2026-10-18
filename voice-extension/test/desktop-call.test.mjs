@@ -1,11 +1,11 @@
 import{test}from'node:test';import assert from'node:assert/strict';import fs from'node:fs';import vm from'node:vm';
 const source=fs.readFileSync(new URL('../lib/client.js',import.meta.url),'utf8');
-test('call prompts never enter the ordinary queue while message prompts keep queue semantics',async()=>{
+test('call prompts use steer mode while voice messages enter the queue dock for 3-way choice (修改/引导/等待)',async()=>{
  const sent=[];const context=vm.createContext({AbortSignal,fetch:async(url,opts)=>{sent.push(JSON.parse(opts.body));return{ok:true,json:async()=>({ok:true,value:{accepted:true}})}}});
  vm.runInContext(source.slice(source.indexOf('async function voicePrompt('),source.indexOf('function voiceInlineBindings(')),context);
  await context.voicePrompt({s:'session-fixture',requestId:'call-1',mode:'call',text:'同一句话'});
  await context.voicePrompt({s:'session-fixture',requestId:'message-1',mode:'message',text:'语音消息'});
- assert.equal(sent[0].payload.mode,'steer','telephone speech must not appear in normal queued-message list');assert.equal(sent[1].payload.mode,'queue');
+ assert.equal(sent[0].payload.mode,'steer','telephone speech must steer immediately');assert.equal(sent[1].payload.mode,'queue','voice message must enter queue dock so user can choose 修改 / 引导 / 等待');
 });
 test('call capture must not use the regression 900ms ceiling for natural speech pauses',()=>{
  const context=vm.createContext({});vm.runInContext(source.slice(source.indexOf('function voiceModeConfig('),source.indexOf('function MicButton(')),context);
@@ -48,10 +48,10 @@ test('call owns a single phone panel while legacy status bar and mini overlay re
  vm.runInContext(source.slice(source.indexOf('function VoiceOverlay('),source.lastIndexOf('return module.exports;')),c);
  const bus={activeSessionId:'s',ui:{voiceKind:'call',playing:true}};assert.equal(c.VoiceStatusBar({bus,sessionId:'s'}),null);assert.equal(c.VoiceOverlay({bus}),null);assert.match(source,/ui.voiceKind = mode;/);
 });
-test('busy session accepts a call as non-destructive supplement while draft and message guards retain purpose',()=>{
+test('busy session accepts a call and voice message as non-destructive supplement while draft guard retains purpose',()=>{
  const c=vm.createContext({});vm.runInContext(source.slice(source.indexOf('function voiceEntryError'),source.indexOf('function MicButton')),c);
  assert.equal(c.voiceEntryError('call','',true),null);assert.match(c.voiceEntryError('call','已有草稿',true),/先处理输入框草稿/);
- assert.match(c.voiceEntryError('message','',true),/等待完成/);assert.equal(c.voiceEntryError('message','',false),null);
+ assert.equal(c.voiceEntryError('message','',true),null);assert.equal(c.voiceEntryError('message','',false),null);
  assert.equal(c.voiceEntryError('draft','已有草稿',true),null);
  assert.equal((source.match(/voiceEntryError\(voiceKindRef.current,draftRef.current,runningRef.current\)/g)||[]).length,2);
  assert.match(source,/callModelRunning:runningRef.current,callPhase:runningRef.current\?'thinking':'listening'/);

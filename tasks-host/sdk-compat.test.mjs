@@ -1,0 +1,21 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import path from 'node:path';import {pathToFileURL} from 'node:url';import {eventsOf,pluginTag,pluginSource,taskRecordType} from './sdk-compat.mjs';import {periodicProof} from './periodic.mjs';
+import {createNativeAdapter,registerTaskEventCompatibility} from './index.js';
+test('old and migrated plugin sources and records retain run identity',()=>{assert.equal(pluginTag(pluginSource('dsh-tasks/r')),'dsh-tasks/r');assert.equal(pluginTag(pluginSource('dsh-tasks/r',true)),'dsh-tasks/r');for(const type of ['plugin:dsh-tasks/goal','plugin:automatic-task/goal'])assert.equal(taskRecordType({type,ignorable:true}),'automatic-task/goal');assert.equal(taskRecordType({type:'plugin:dsh-tasks/goal'}),'plugin:dsh-tasks/goal');assert.deepEqual(eventsOf({snapshotEvents:()=>[1]}),[1]);assert.deepEqual(eventsOf({events:[2]}),[2])});
+const sdkRoot=process.env.DSH_SDK_TEST_ROOT;
+test('candidate native SDK produces plugin records and native tool envelopes accepted by adapter',{skip:!sdkRoot?'Set DSH_SDK_TEST_ROOT to an isolated SDK node_modules directory':false},async()=>{
+ const load=name=>import(pathToFileURL(path.join(sdkRoot,'@deepseek-ai',name,'lib/index.js')).href),s=await load('dsh-session'),llm=await load('dsh-llm');
+ const migration=await load('dsh-session-format-v3-to-v4'),header={version:4,id:'session-fixture',createdAt:1,isSeeded:false,delegationDepth:0},legacy={seq:0,time:1,type:'automatic-task/start',data:{runId:'r',sourceTag:'dsh-tasks/r'}};
+ assert.throws(()=>migration.restoreReleasedV4Artifact({header,inheritedEventCount:0,events:[legacy]},s.KNOWN_SESSION_EVENT_TYPES),/unknown event type/);
+ assert.doesNotThrow(()=>migration.restoreReleasedV4Artifact({header,inheritedEventCount:0,events:[{...legacy,type:'plugin:automatic-task/start',ignorable:true}]},s.KNOWN_SESSION_EVENT_TYPES));
+ const session=s.Session.create('session-sdk-fixture');assert.equal(s.SESSION_FORMAT_VERSION,4);assert.equal(session.events,undefined);
+ const vocabularySize=s.KNOWN_SESSION_EVENT_TYPES.size;registerTaskEventCompatibility(s);assert.equal(s.KNOWN_SESSION_EVENT_TYPES.size,vocabularySize);
+ s.appendPluginRecord(session,'plugin:dsh-tasks/start',{runId:'r',sourceTag:'dsh-tasks/r'});const record=eventsOf(session)[0];assert.equal(record.ignorable,true);assert.equal(taskRecordType(record),'automatic-task/start');
+ const msg=llm.createUserMessage({source:pluginSource('dsh-tasks/r',true),content:[{type:'text',text:'fixture'}]});assert.equal(pluginTag(msg.source),'dsh-tasks/r');
+ const tool=llm.createToolResultMessage({callId:'call-fixture',content:[{type:'text',text:'fixture'}],isError:false});assert.equal(tool.role,'tool');
+ const proof=periodicProof({task:{schedule:{kind:'daily'},continuous:true,enabled:true},run:{stage:'accepted',goal:{id:'g'}},goal:{id:'g',revision:1,phase:'blocked',activation:'disarmed',blockedReason:{code:'fixture-unavailable',message:'fixture'}},agent:{status:'idle'},approvals:0,events:[{type:'tool/call',data:{callId:'call-fixture',name:'read'}},{type:'tool/result',data:{message:tool}},{type:'turn/end',data:{reason:{kind:'completed'}}}]});assert.equal(proof.eligible,true);
+ const fresh=s.Session.create('session-sdk-owned'),agent={id:fresh.id,status:'idle',session:fresh,inbox:{hasPending:false}};let goal=null;
+ const adapter=createNativeAdapter({agents:{get:()=>agent},goals:{get:()=>goal,create:()=>goal={id:'g',revision:1,phase:'active'}},sessions:{flush:async()=>true},permissionPresets:{current:value=>{assert.equal(value,fresh);return'read-only'}}},{createUserMessage:llm.createUserMessage,sessionModule:s});
+ assert.equal(adapter.currentPermission(fresh),'read-only');
+ await adapter.dispatch({title:'fixture',objective:'fixture',continuous:true,maxGoalRounds:1,context:{workspacePath:fresh.header.cwd||process.cwd()}},{id:'r2',sessionId:fresh.id,sourceTag:'dsh-tasks/r2'});
+ assert.deepEqual(eventsOf(fresh).map(e=>[e.type,e.ignorable]),[['plugin:dsh-tasks/start',true],['plugin:dsh-tasks/goal',true]]);
+});
