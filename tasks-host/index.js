@@ -4,9 +4,10 @@ import crypto from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { taskDataDir } from './user-data.mjs'
+import {isPeriodic,periodicProof} from './periodic.mjs'
 import { trusted, canonicalTrustedHost } from '../plugin/server.js'
 import { registerTaskTools } from './tools.mjs?source-chat-v1'
-import { createTaskService } from './service.mjs?restart-recovery-v1'
+import { createTaskService } from './service.mjs?periodic-v5'
 
 export const name = 'tasks'
 export const inject = ['webServer', 'agents', 'goals', 'sessions', 'permissionPresets', 'tools', 'systemPrompt']
@@ -14,7 +15,7 @@ const fail = (message, status = 400) => { throw Object.assign(new Error(message)
 const ref = goal => ({ id: goal.id, revision: goal.revision })
 const textOf = message => (message?.content || []).filter(p => p.type === 'text').map(p => p.text).join('\n')
 const eventMessage = event => event?.data?.message || event?.data
-export const goalObjective = task => task.objective + '\n\n执行要求（仅在上述目标范围内）：先建立并维护待办步骤，按顺序执行并核验交付；不依赖待答问题的独立工作可继续，权限与授权仍须等待明确确认。'
+export const goalObjective = task => task.objective + '\n\n执行要求（仅在上述目标范围内）：先建立并维护待办步骤，按顺序执行并核验交付；不依赖待答问题的独立工作可继续，权限与授权仍须等待明确确认。' + (task.previousBlockedReason ? '\n上一轮受阻记录（仅背景，非新授权）：'+JSON.stringify(task.previousBlockedReason).slice(0,2000)+'\n先核对外部条件是否变化，不得原样重复失败；未回答的问题或授权请求不代表同意，不能自动重试未知外发。' : '')
 
 // This harness has no downstream event registration API yet. Register only
 // our two existing persisted names in its shared vocabulary; never rewrite logs
@@ -33,6 +34,18 @@ function validTaskMarker(event) {
 }
 
 export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
+  const occupancyCache = new Map()
+  const runBoundaries = new Map()
+  // Session.events is a fresh frozen array after append, not a mutable log.
+  // Accepted events retain identity and contiguous seq across those snapshots.
+  const appendedSnapshot = (session, events, prior) => {
+    if (!prior || prior.session !== session || events.length < prior.length) return false
+    if (!prior.length) return true
+    if (events[prior.length - 1] !== prior.lastEvent) return false
+    if (events.length === prior.length) return true
+    return Number.isSafeInteger(prior.seq) && events[prior.length]?.seq === prior.seq + 1 && events.at(-1)?.seq === prior.seq + events.length - prior.length
+  }
+  const snapshotBoundary = (session, events) => ({session, length:events.length, lastEvent:events.at(-1), seq:events.at(-1)?.seq ?? -1})
   async function flush(session) { if (!await ctx.sessions.flush(session)) fail('会话没有可用持久化，任务不会启动', 409) }
   function owned(task, run) {
     if (!run || !run.sessionId || run.sourceTag !== 'dsh-tasks/' + run.id) fail('任务会话归属不正确', 403)
@@ -68,14 +81,33 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
   }
   function bounds(agent, run) {
     const events = agent.session.events || []
-    if (events.some(e => (e.type === 'automatic-task/start' || e.type === 'automatic-task/goal') && !validTaskMarker(e))) fail('自动任务事件归属数据无效，请核对原聊天', 409)
-    const marker = events.find(e => e.type === 'automatic-task/start' && e.data?.sourceTag === run.sourceTag && e.data?.runId === run.id)
-    const after = marker ? events.filter(e => e.seq > marker.seq) : run.inSourceSession ? [] : events
+    const identity = JSON.stringify([run.id,run.sourceTag,run.eventStartSeq,!!run.inSourceSession])
+    const cached = runBoundaries.get(run.id)
+    const reusable = cached?.identity === identity && appendedSnapshot(agent.session,events,cached.boundary)
+    let scanFrom = 0, markerIndex = reusable ? cached.markerIndex : -1
+    if (reusable) scanFrom = cached.boundary.length
+    else if (Number.isSafeInteger(run.eventStartSeq) && run.eventStartSeq >= 0 && events[run.eventStartSeq]?.seq === run.eventStartSeq) {
+      // prepare records the previous tail. An empty log uses zero; if its
+      // first event is our marker, include it rather than skipping seq zero.
+      const anchor=events[run.eventStartSeq]
+      scanFrom=anchor.type==='automatic-task/start'&&anchor.data?.runId===run.id ? run.eventStartSeq : run.eventStartSeq+1
+    }
+    const runStart = reusable ? cached.runStart : scanFrom
+    for(let i=scanFrom;i<events.length;i++) {
+      const e=events[i]
+      if ((e.type==='automatic-task/start'||e.type==='automatic-task/goal')&&!validTaskMarker(e)) fail('自动任务事件归属数据无效，请核对原聊天',409)
+      if(markerIndex<0&&e.type==='automatic-task/start'&&e.data?.sourceTag===run.sourceTag&&e.data?.runId===run.id)markerIndex=i
+    }
+    runBoundaries.delete(run.id)
+    runBoundaries.set(run.id,{identity,markerIndex,runStart,boundary:snapshotBoundary(agent.session,events)})
+    while(runBoundaries.size>128)runBoundaries.delete(runBoundaries.keys().next().value)
+    const after = markerIndex>=0 ? events.slice(markerIndex+1) : run.inSourceSession ? [] : events.slice(runStart)
     const binding = after.find(e => e.type === 'automatic-task/goal' && e.data?.sourceTag === run.sourceTag && e.data?.runId === run.id)
     const goalId = run.goal?.id || binding?.data?.goalId
     const matches = message => message?.source?.kind === 'plugin' && message.source.plugin === run.sourceTag || goalId && message?.source?.kind === 'goal' && message.source.goalId === goalId
     const message = after.find(e => e.type === 'user/message' && matches(eventMessage(e)))
-    const start = message && [...events].reverse().find(e => e.type === 'turn/start' && e.seq < message.seq)
+    let start
+    if(message)for(let i=after.indexOf(message)-1;i>=0;i--)if(after[i].type==='turn/start'){start=after[i];break}
     const end = start && after.find(e => e.type === 'turn/end' && e.seq > message.seq && e.data?.turn === start.data?.turn)
     const ownedEvents = []
     let turnEvents = [], belongs = false
@@ -83,12 +115,12 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
       if (event.type === 'turn/start') { turnEvents = []; belongs = false }
       turnEvents.push(event)
       if (event.type === 'user/message' && matches(eventMessage(event))) belongs = true
-      if (event.type === 'turn/end') { if (belongs) ownedEvents.push(...turnEvents); turnEvents = []; belongs = false }
+      if (event.type === 'turn/end') { if (belongs) for (const ownedEvent of turnEvents) ownedEvents.push(ownedEvent); turnEvents = []; belongs = false }
     }
-    if (belongs) ownedEvents.push(...turnEvents)
+    if (belongs) for (const ownedEvent of turnEvents) ownedEvents.push(ownedEvent)
     return { after, goalId, matches, message, start, end, ownedEvents, openOwned: belongs }
   }
-  async function inspect(task, run) {
+  async function inspectRun(task, run) {
     const agent = ctx.agents.get(run.sessionId)
     if (!agent) return { status: 'interrupted', running: false, summary: '会话尚未恢复，请明确继续' }
     owned(task, run)
@@ -108,6 +140,93 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
     const ended = bound.end
     if (events.some(e => e.type === 'user/message' && !bound.matches(eventMessage(e)))) return { status: 'interrupted', running: false, summary: '本次执行中有其他输入，请在原聊天核对结果', todos: [] }
     return { status: ended ? (ended.data?.reason?.kind === 'completed' ? 'complete' : ended.data?.reason?.kind === 'aborted' ? 'paused' : 'blocked') : task.enabled === false ? 'paused' : 'running', running: !ended && (agent.status === 'running' || task.enabled !== false), summary, todos }
+  }
+  async function inspect(task, run) {
+    if ((task.archived || task.manualPause || task.status === 'paused') && run.stage === 'accepted' && run.status !== 'unknown' && !['unknown','dispatching'].includes(run.restartRecovery?.status) && !ctx.agents.get(run.sessionId) && typeof rpc === 'function') {
+      // Resolve only an existing persisted session through the native read API.
+      // Do not use load(): its standalone branch can create a new session.
+      await workspace(task)
+      await rpc('session.models', { sessionId: run.sessionId })
+    }
+    const suppressed = task.archived || task.manualPause || task.status === 'paused'
+    const agent = ctx.agents.get(run.sessionId)
+    const priorOccupancy = occupancyCache.get(run.id)
+    let cacheKey
+    const identity = JSON.stringify([run.id,run.stage,run.status,run.restartRecovery?.status,run.goal?.id,run.sourceTag,!!run.inSourceSession,!!task.continuous,!!task.enabled,!!task.archived,!!task.manualPause,task.status])
+    if (suppressed && agent) {
+      owned(task, run)
+      const events = agent.session.events || [], goal = ctx.goals.get(agent)
+      cacheKey = JSON.stringify([events.length, events.at(-1)?.seq, goal?.id, goal?.revision, goal?.phase, goal?.activation, agent.status, !!agent.inbox?.hasPending, run.id, run.stage, run.status, !!run.running, run.restartRecovery?.status, run.goal?.id, run.sourceTag, !!run.inSourceSession, !!task.continuous, !!task.enabled, !!task.archived, !!task.manualPause, task.status])
+      const cached = occupancyCache.get(run.id)
+      if (cached?.agent === agent && appendedSnapshot(agent.session, events, cached.boundary) && cached.key === cacheKey) {
+        occupancyCache.delete(run.id); occupancyCache.set(run.id, cached)
+        return structuredClone(cached.view)
+      }
+      if (cached?.proof && cached.identity === identity && cached.agent === agent && appendedSnapshot(agent.session, events, cached.boundary) && ['idle','running'].includes(agent.status) && (!goal || run.goal?.id && goal.id !== run.goal.id)) {
+        let foreignTurn = cached.foreignTurn || false, openTurn = cached.openTurn || false, safe = true
+        for (let i=cached.observedLength;i<events.length;i++) {
+          const event=events[i]
+          if (event.type === 'turn/start') { openTurn=true; foreignTurn=false }
+          if (event.type === 'user/message') {
+            const source=eventMessage(event)?.source
+            if (!openTurn || !source || source.kind === 'plugin' && source.plugin === run.sourceTag || run.goal?.id && source.kind === 'goal' && source.goalId === run.goal.id) { safe=false; break }
+            foreignTurn=true
+          }
+          if (event.type === 'goal/change' && run.goal?.id && event.data?.goal?.id === run.goal.id) { safe=false; break }
+          if (event.type === 'tool/result' && !foreignTurn && JSON.stringify(event.data).includes('TOOL_OUTCOME_UNKNOWN')) { safe=false; break }
+          if (event.type === 'turn/end') { openTurn=false }
+        }
+        if (safe && foreignTurn) {
+          const updated={...cached,key:cacheKey,observedLength:events.length,boundary:snapshotBoundary(agent.session,events),foreignTurn,openTurn}
+          occupancyCache.delete(run.id);occupancyCache.set(run.id,updated)
+          return structuredClone(cached.view)
+        }
+      }
+    }
+    const view = await inspectRun(task, run)
+    if (!suppressed) {
+      if (isPeriodic(task) && view.status==='blocked') {
+        const bound=bounds(agent,run),approvals=new Set()
+        for(const e of agent.session.events||[]){if(e.type==='approval/asked')approvals.add(e.data.id);else if(e.type==='approval/decided')approvals.delete(e.data.id)}
+        return {...view,periodicSettlement:periodicProof({task,run,goal:ctx.goals.get(agent),agent,events:bound.ownedEvents,approvals:approvals.size})}
+      }
+      return view
+    }
+    let stopped = false
+    let stoppedProof
+    if (agent && run.stage === 'accepted' && run.status !== 'unknown' && !['unknown','dispatching'].includes(run.restartRecovery?.status)) {
+      owned(task, run)
+      const goal = ctx.goals.get(agent), bound = bounds(agent, run), approvals = new Set()
+      for (const event of agent.session.events || []) {
+        if (event.type === 'approval/asked') approvals.add(event.data.id)
+        else if (event.type === 'approval/decided') approvals.delete(event.data.id)
+      }
+      const runEvents = task.continuous ? bound.ownedEvents : bound.message ? bound.after.filter(event => event.seq >= bound.message.seq && (!bound.end || event.seq <= bound.end.seq)) : []
+      const uncertain = runEvents.some(event => event.type === 'tool/result' && JSON.stringify(event.data).includes('TOOL_OUTCOME_UNKNOWN'))
+      stopped = agent.status === 'idle' && !agent.inbox?.hasPending && !approvals.size && !uncertain && (!goal || goal.activation === 'disarmed')
+      const events = agent.session.events || [], previous = priorOccupancy?.proof
+      if (stopped) stoppedProof = { agent, ...snapshotBoundary(agent.session,events) }
+      else if (previous && previous.agent === agent && appendedSnapshot(agent.session,events,previous) && !uncertain && !bound.openOwned && (!goal || bound.goalId && goal.id !== bound.goalId)) {
+        // A later, explicitly unrelated turn must not resurrect this archived
+        // run merely because both runs share the same conversation/agent.
+        let laterTurn = false, differentInput = false
+        for (const event of events) {
+          if (!(event.seq > previous.seq)) continue
+          if (event.type === 'turn/start') { laterTurn = true; differentInput = false }
+          if (laterTurn && event.type === 'user/message') differentInput = !bound.matches(eventMessage(event))
+          if (event.type === 'turn/end') { laterTurn = false; differentInput = false }
+        }
+        if (laterTurn && differentInput) { stopped = true; stoppedProof = previous }
+      }
+    }
+    const result = { ...view, ...(stopped ? { running: false } : {}), occupancyConfirmedStopped: stopped }
+    if (agent && cacheKey) {
+      const snapshot = structuredClone({ ...result, todos: Array.isArray(result.todos) ? result.todos.slice(0, 100) : [] })
+      occupancyCache.delete(run.id)
+      occupancyCache.set(run.id, { agent, boundary:snapshotBoundary(agent.session,agent.session.events), key: cacheKey, identity, view: snapshot, proof: stoppedProof, observedLength:agent.session.events.length,foreignTurn:false,openTurn:false })
+      while (occupancyCache.size > 128) occupancyCache.delete(occupancyCache.keys().next().value)
+    }
+    return result
   }
   async function inspectRestart(task,run,context){
     const no=summary=>({status:'interrupted',running:false,resumable:false,summary,todos:[]})
@@ -148,7 +267,7 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
     async diagnostics(task, run) {
       const agent = ctx.agents.get(run.sessionId), event = [...(agent?.session.events || [])].reverse().find(e => e.type === 'assistant/message')
       const result = { live: !!agent, agentStatus: agent?.status || null, sourceTagMatches: run.sourceTag === 'dsh-tasks/' + run.id, cwdMatches: !agent?.session.header?.cwd || path.resolve(agent.session.header.cwd) === path.resolve(task.context.workspacePath), lastAssistantSeq: event?.seq ?? null, lastAssistantDataKeys: Object.keys(event?.data || {}), candidateSummaryLength: textOf(eventMessage(event)).length }
-      try { const view = await inspect(task, run); return { ...result, inspectStatus: view.status, inspectSummaryLength: view.summary?.length || 0 } } catch (error) { return { ...result, inspectError: String(error.message || 'inspect failed').slice(0, 200) } }
+      try { const view = await inspect(task, run); return { ...result, inspectStatus: view.status, occupancyConfirmedStopped: view.occupancyConfirmedStopped === true, inspectRunning: !!view.running, inspectSummaryLength: view.summary?.length || 0 } } catch (error) { return { ...result, inspectError: String(error.message || 'inspect failed').slice(0, 200) } }
     },
     async catalog() {
       const workspaces = (await rpc('workspace.list', {})).items.map(w => ({ workspaceId: w.workspaceId, title: w.title, path: w.path, sessionIds: [...(w.sessionIds || [])] }))
@@ -200,6 +319,38 @@ export function createNativeAdapter(ctx, { rpc, createUserMessage }) {
       return { running: true }
     },
     inspect,
+    async prepareNextOccurrence(task,run) {
+      const view=await inspect(task,run)
+      if(!view.periodicSettlement?.eligible)return{ready:false,reason:view.periodicSettlement?.reason||'旧运行尚未核实停止'}
+      const agent=owned(task,run),goal=ctx.goals.get(agent),expected=run.periodicSettlement?.goalRef
+      if(!expected||goal?.id!==expected.id||goal?.revision!==expected.revision||agent.status!=='idle'||agent.inbox?.hasPending)return{ready:false,reason:'原目标已变化，请人工核对'}
+      const approvals=new Set(),bound=bounds(agent,run)
+      for(const e of agent.session.events||[]){if(e.type==='approval/asked')approvals.add(e.data.id);else if(e.type==='approval/decided')approvals.delete(e.data.id)}
+      const current=periodicProof({task,run,goal,agent,events:bound.ownedEvents,approvals:approvals.size})
+      if(!current.eligible)return{ready:false,reason:current.reason}
+      ctx.goals.clear(agent,ref(goal));await flush(agent.session)
+      occupancyCache.delete(run.id)
+      return{ready:true}
+    },
+    async archive(task, run) {
+      if (!task.archived) fail('仅明确归档时可以清理停止目标',409)
+      if (run.stage !== 'accepted' || run.status === 'unknown' || ['unknown','dispatching'].includes(run.restartRecovery?.status)) return { cleanup:'unconfirmed' }
+      const view=await inspect(task,run),agent=ctx.agents.get(run.sessionId)
+      if (!agent || view.occupancyConfirmedStopped !== true || agent.status !== 'idle' || agent.inbox?.hasPending) return { cleanup:'not-stopped' }
+      owned(task,run)
+      const goal=ctx.goals.get(agent),bound=bounds(agent,run),goalId=bound.goalId,approvals=new Set()
+      for(const event of agent.session.events||[]) { if(event.type==='approval/asked')approvals.add(event.data.id);else if(event.type==='approval/decided')approvals.delete(event.data.id) }
+      const runEvents=task.continuous?bound.ownedEvents:bound.message?bound.after.filter(event=>event.seq>=bound.message.seq&&(!bound.end||event.seq<=bound.end.seq)):[]
+      if(approvals.size||runEvents.some(event=>event.type==='tool/result'&&JSON.stringify(event.data).includes('TOOL_OUTCOME_UNKNOWN')))return{cleanup:'unconfirmed'}
+      if (goal && goal.id !== goalId) return { running:false,goalCleared:false,cleanup:'different-goal' }
+      if (goal && !['blocked','paused'].includes(goal.phase) && goal.activation !== 'disarmed') return { cleanup:'not-stopped' }
+      // clear appends a native tombstone under revision CAS; it neither marks
+      // the business objective complete nor deletes any historical events.
+      const cleared=goal ? ctx.goals.clear(agent,ref(goal)) : null
+      await flush(agent.session)
+      occupancyCache.delete(run.id)
+      return {running:false,goalCleared:!!cleared,...cleared?{clearedGoal:cleared}:{}}
+    },
     async pause(task, run) {
       const agent = ctx.agents.get(run.sessionId); if (!agent) return
       owned(task, run)

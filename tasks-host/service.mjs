@@ -6,7 +6,7 @@ const clone = x => JSON.parse(JSON.stringify(x))
 const fail = (message, status = 400, code = 'tasks') => { throw Object.assign(new Error(message), { status, code }) }
 const uuid = x => typeof x === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x)
 const active = r => r && (['claimed', 'waiting-idle', 'dispatching', 'running', 'pausing', 'waiting-user', 'unknown'].includes(r.status) || (r.status === 'interrupted' && ['dispatching', 'accepted'].includes(r.stage)) || r.running)
-const recoverable = r => r && ['interrupted', 'unknown', 'paused', 'blocked'].includes(r.status)
+const recoverable = r => r && ['interrupted', 'unknown', 'paused', 'blocked'].includes(r.status) && !(r.status==='blocked'&&r.periodicSettlement?.status==='blocked-terminal'&&!['clearing','unknown'].includes(r.nextOccurrencePreparation?.status))
 
 export function createTaskService({ dir, adapter, now = () => Date.now(), maxActive = 2, maxTasks = 200, startupContext }) {
   if (!dir || !adapter) fail('任务服务配置不完整')
@@ -17,6 +17,9 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
   let state = { version: 1, tasks: [], requests: [] }, chain = Promise.resolve(), timer = null, closing = false
   const launches = new Set()
   const completedInspections = new Set()
+  const stoppedOccupancy = new Set()
+  const suppressed = task => task.archived || task.manualPause || task.status === 'paused'
+  const occupies = task => active(task.lastRun) && !(suppressed(task) && stoppedOccupancy.has(task.lastRun.id))
   let tickInFlight = null, refreshInFlight = null, restartInFlight = null
   if (fs.existsSync(file)) {
     if (fs.lstatSync(file).isSymbolicLink() || fs.statSync(file).size > 8 * 1024 * 1024) fail('任务存储异常', 409)
@@ -37,6 +40,9 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
     if (run.status === 'interrupted' && previous?.sourceBootId === state.runtimeBootId && !task.manualPause && !task.archived) return
     run.restartCandidate = { sourceBootId: state.runtimeBootId || null, wasEnabled: task.enabled === true && !task.archived && !task.manualPause && run.stage === 'accepted' && !['paused','unknown','blocked'].includes(run.status), source, observedAt: new Date(now()).toISOString() }
   }
+  for (const task of state.tasks) if (task.lastRun?.nextOccurrencePreparation?.status === 'clearing') {
+    task.lastRun.nextOccurrencePreparation.status='unknown';task.lastRun.settlementBlockedReason='重启前旧目标清理结果未确认，需人工核对，不自动重试';task.enabled=false;task.status=task.archived?'archived':'blocked'
+  }
   for (const task of state.tasks) if (active(task.lastRun) && !task.archived && task.status !== 'paused' && !task.manualPause) {
     snapshotRestart(task, 'startup')
     task.enabled = false; task.status = 'interrupted'; task.lastRun.status = 'interrupted'; task.lastRun.running = false
@@ -45,7 +51,7 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
   if (state.tasks.length) save()
   const locked = fn => { const result = chain.then(fn); chain = result.catch(() => {}); return result }
   const find = id => { const task = state.tasks.find(t => t.id === id); if (!task) fail('找不到任务', 404); return task }
-  const countActive = () => state.tasks.filter(t => active(t.lastRun)).length
+  const countActive = () => state.tasks.filter(occupies).length
   function validate(input, previous) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) fail('任务内容不正确')
     const x = { ...previous, ...input }
@@ -58,7 +64,7 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
     return { title: x.title.trim(), objective: x.objective.trim(), workspaceId: x.workspaceId, sourceSessionId: x.sourceSessionId || null, permissionPreset: x.permissionPreset || 'workspace-write', maxGoalRounds, continuous: x.continuous !== false, schedule: normalizeSchedule(x.schedule, now(), !!previous && JSON.stringify(x.schedule) === JSON.stringify(previous.schedule)) }
   }
   const targetSession = task => task.sourceSessionId || task.executionSessionId
-  const sourceOccupied = task => !!targetSession(task) && state.tasks.some(other => other.id !== task.id && active(other.lastRun) && other.lastRun.sessionId === targetSession(task))
+  const sourceOccupied = task => !!targetSession(task) && state.tasks.some(other => other.id !== task.id && occupies(other) && other.lastRun.sessionId === targetSession(task))
   async function canStart(task) { return !sourceOccupied(task) && (!adapter.canStart || await adapter.canStart(clone(task))) }
   async function scheduledReady(task) {
     try { return await canStart(task) } catch (error) {
@@ -70,6 +76,8 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
     if (recoverable(task.lastRun)) fail('先继续或核对上次任务，不重放未知结果', 409)
     if (sourceOccupied(task)) fail('原聊天中已有自动任务，请稍后', 409)
     if (countActive() >= maxActive) fail('其他自动任务正在运行，请稍后', 409)
+    if(task.pendingBlockedContext){task.previousBlockedReason=clone(task.pendingBlockedContext);delete task.pendingBlockedContext}
+    else if(task.lastRun?.periodicSettlement?.status!=='blocked-terminal')delete task.previousBlockedReason
     if (task.lastRun) task.runs = [...(task.runs || []), task.lastRun].slice(-20)
     const id = crypto.randomUUID(), existingSession = targetSession(task)
     task.executionSessionId = existingSession || 'session-' + crypto.randomUUID()
@@ -118,6 +126,20 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
   async function refreshOnce() {
     for (const original of [...state.tasks]) {
       const run = original.lastRun
+      if (run && suppressed(original) && active(run)) {
+        // Resource occupancy is not the task result: preserve the archived or
+        // paused record, and never resume/replay it to reconcile a stale slot.
+        let view
+        try { view = await adapter.inspect(clone(original), clone(run)) } catch {}
+        await locked(() => {
+          const task = find(original.id)
+          if (task.lastRun?.id !== run.id) return
+          const unknown = run.status === 'unknown' || run.stage === 'dispatching' || ['unknown','dispatching'].includes(run.restartRecovery?.status)
+          if (suppressed(task) && !unknown && view?.occupancyConfirmedStopped === true && view.running === false) stoppedOccupancy.add(run.id)
+          else stoppedOccupancy.delete(run.id)
+        })
+        continue
+      }
       if (!run || run.stage !== 'accepted' || (!['running', 'paused', 'pausing', 'waiting-user'].includes(run.status) && !(run.status === 'complete' && (run.running || ((!run.summary || !run.finishedAt) && !completedInspections.has(run.id)))))) continue
       let view
       try { view = await adapter.inspect(clone(original), clone(run)) } catch { continue }
@@ -133,7 +155,11 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
         } else if (view.status === 'running' && task.enabled && !task.archived) {
           task.lastRun.status = 'running'; task.status = 'running'
         } else if (['blocked', 'paused', 'interrupted'].includes(view.status)) {
-          task.lastRun.status = view.status; task.status = task.archived ? 'archived' : view.status; task.enabled = false
+          if(view.status==='blocked'&&view.running&&['daily','interval'].includes(task.schedule?.kind)&&task.enabled&&!task.manualPause&&!task.archived){task.lastRun.status='running';task.status='running'}
+          else if(view.status==='blocked'&&view.periodicSettlement?.eligible===true&&view.running===false&&task.enabled&&!task.manualPause&&!task.archived&&['daily','interval'].includes(task.schedule?.kind)){
+            task.lastRun.status='blocked';task.lastRun.finishedAt ||= new Date(now()).toISOString();task.lastRun.periodicSettlement={...view.periodicSettlement,status:'blocked-terminal'};task.status='scheduled'
+            if(!task.nextRunAt||Date.parse(task.nextRunAt)<=now())task.nextRunAt=nextRun(task.schedule,now())
+          }else{task.lastRun.status = view.status; task.status = task.archived ? 'archived' : view.status; task.enabled = false;if(view.periodicSettlement?.reason)task.lastRun.settlementBlockedReason=view.periodicSettlement.reason}
         }
         save()
       })
@@ -213,6 +239,20 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
         if (!task.enabled || task.archived || active(task.lastRun) || recoverable(task.lastRun) || countActive() >= maxActive) continue
         const occurrence = dueOccurrence(task.schedule, task.nextRunAt, now())
         if (!occurrence) continue
+        let ready=true
+        const predecessors=state.tasks.filter(previous=>(previous.enabled||['clearing','unknown'].includes(previous.lastRun?.nextOccurrencePreparation?.status))&&!previous.archived&&!previous.manualPause&&previous.lastRun?.periodicSettlement?.status==='blocked-terminal'&&(previous.id===task.id||targetSession(task)&&targetSession(previous)===targetSession(task)))
+        for(const previous of predecessors){
+          const old=previous.lastRun
+          if(old.nextOccurrencePreparation?.status==='ready')continue
+          if(typeof adapter.prepareNextOccurrence!=='function'||['clearing','unknown'].includes(old.nextOccurrencePreparation?.status)){ready=false;task.enabled=false;task.status='blocked';task.error='原聊天旧目标清理结果未确认';save();break}
+          old.nextOccurrencePreparation={status:'clearing',forTaskId:task.id,occurrence:occurrence.scheduledAt,at:new Date(now()).toISOString()};save()
+          try{
+            const result=await adapter.prepareNextOccurrence(clone(previous),clone(old))
+            if(!result?.ready){old.nextOccurrencePreparation={status:'waiting',reason:result?.reason||'旧目标未清理'};previous.enabled=false;previous.status='blocked';task.enabled=false;task.status='blocked';ready=false;save();break}
+            old.nextOccurrencePreparation={status:'ready',forTaskId:task.id,occurrence:occurrence.scheduledAt};task.pendingBlockedContext=clone(old.periodicSettlement.blockedReason);save()
+          }catch{old.nextOccurrencePreparation={status:'unknown'};previous.enabled=false;previous.status='blocked';task.enabled=false;task.status='blocked';ready=false;save();break}
+        }
+        if(!ready)continue
         if (!await scheduledReady(task)) { if (task.enabled && task.status !== 'waiting-idle') { task.status = 'waiting-idle'; save() }; continue }
         task.nextRunAt = occurrence.nextRunAt
         jobs.push(claim(task, occurrence.scheduledAt))
@@ -260,8 +300,13 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
           task.enabled = false; task.archived = action === 'archive' || task.archived; task.manualPause = true
           save() // Persist manual intent before an asynchronous pause can race a crash.
           if (task.lastRun && !['complete'].includes(task.lastRun.status)) {
-            if (task.lastRun.stage === 'accepted' || task.lastRun.stage === 'dispatching') await adapter.pause(clone(task), clone(task.lastRun))
-            task.lastRun.status = 'paused'
+            const unknown = task.lastRun.status === 'unknown' || task.lastRun.stage === 'dispatching' || ['unknown','dispatching'].includes(task.lastRun.restartRecovery?.status)
+            if (!unknown && task.lastRun.stage === 'accepted') await adapter.pause(clone(task), clone(task.lastRun))
+            if (action === 'archive' && typeof adapter.archive === 'function') {
+              const receipt = await adapter.archive(clone(task), clone(task.lastRun))
+              if (!unknown && receipt?.running === false) { task.lastRun.running=false; task.lastRun.archiveCleanup={goalCleared:receipt.goalCleared===true,checkedAt:new Date(now()).toISOString(),...(receipt.clearedGoal?{clearedGoal:receipt.clearedGoal}:{})} }
+            }
+            if (!unknown) task.lastRun.status = 'paused'
           }
           task.status = task.archived ? 'archived' : 'paused'
         } else if (action === 'archive') {
@@ -293,7 +338,7 @@ export function createTaskService({ dir, adapter, now = () => Date.now(), maxAct
     return result
   }
   return {
-    apiVersion: 3,
+    apiVersion: 5,
     mutate, tick, recoverRestart,
     async list(id) { await refresh(); return clone(id ? [find(id)] : state.tasks) },
     start() { if (!timer && !closing) { timer = setInterval(() => void tick().catch(() => {}), 1000); timer.unref?.() } },
