@@ -28,7 +28,7 @@
 
 ## 界面更新
 
-**1.6.0 完整发行版**：安卓录音与视频下载、三种语音交互、桌面文件与截图/OCR/翻译、异步提问、原聊天自动任务与恢复、中文社区市场、上下文灰字建议。
+**1.6.1 完整发行版**：安卓录音与视频下载、三种语音交互、桌面文件与截图/OCR/翻译、异步提问、原聊天自动任务与恢复、中文社区市场、上下文灰字建议。
 
 先按[完整扩展安装说明](docs/extensions.md)注册各模块；语音与社区市场需分别安装随仓库提供的固定版本扩展。APK 不捆绑电脑服务、语音模型、第三方播放器或私人配置。详见[更新记录](CHANGELOG.md)。
 
@@ -76,7 +76,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 
 ## 历史真机实测（旧版本）
 
-1.6.0 已通过公开包签名兼容性与主机回归检查；本轮没有连接实体手机/平板，不把旧版体验当作新版完整设备验收。
+1.6.1 已通过公开包签名兼容性与主机回归检查；本轮没有连接实体手机/平板，不把旧版体验当作新版完整设备验收。
 
 实测环境：Redmi（HyperOS / Android 16）与华为平板（HarmonyOS 4.2），经公网链路连回家里电脑（2026-09-21 至 09-22）。
 
@@ -143,7 +143,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 | [dsh-remote-web-gateway](https://github.com/summer1238/dsh-remote-web-gateway) | 网关插件 | 网页 | Cloudflare Quick Tunnel | GitHub 登录 + 一次性配对 + 设备撤销 | 未提及 | 无 App |
 | [DSH Mobile (sorsama)](https://github.com/sorsama/deepseek-harness-mobile) | 原生 Compose App + dsh-relay 插件 | 原生，功能对齐 GUI | 局域网 / relay / 自有反代 | relay 配对 + 固定公钥 | 前台服务：回合完成、目标完成或受阻、审阅或提问等待 | 14.5 MB |
 | [dsh-remote-mobile](https://github.com/IceApriler/dsh-remote-mobile) | 安全网关插件 + 移动端样式 | 桌面界面 + 移动端 CSS | 局域网 / Tailscale | 扫码 + RSA + 防爆破 | 未提及 | 无 App |
-| **dsh-pager（本项目）** | 插件（挂 /m）+ 安卓 WebView 外壳 + iPhone 网页 App；也接 Claude Code / Codex | 为手机重写的界面，服务端先折叠；带结果查看器 | 任意现有通道，不内置隧道 | 交给你的登录网关或异地组网 | 安卓：常驻前台服务 + 专用低频流，通知栏直接允许/拒绝，断线补发；iPhone：网页推送 | **约53 KB（1.6.0）** |
+| **dsh-pager（本项目）** | 插件（挂 /m）+ 安卓 WebView 外壳 + iPhone 网页 App；也接 Claude Code / Codex | 为手机重写的界面，服务端先折叠；带结果查看器 | 任意现有通道，不内置隧道 | 交给你的登录网关或异地组网 | 安卓：常驻前台服务 + 专用低频流，通知栏直接允许/拒绝，断线补发；iPhone：网页推送 | **约53 KB（1.6.1）** |
 
 **我们的定位**：不是把桌面界面搬到手机上，而是做一个"寻呼机"。你锁屏时它替你盯着，需要你时叫你，点开就能处理。所以我们优先保证三件事：体积最小、流量最省、后台提醒最可靠。认证和隧道交给你已有的、更专业的工具。
 
@@ -280,7 +280,7 @@ docs/       远程访问 · Android · iPhone · Claude Code / Codex · DSH 协�
 ## English
 
 **dsh-pager** is a pager for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). It has two parts:
-- a ~53 KB Android app (1.6.0);
+- a ~53 KB Android app (1.6.1);
 - a DSH plugin that serves a phone-first UI and API at `/m` on DSH's own web server.
 
 Together they let you follow sessions, send prompts, and approve or reject tool calls from the notification shade while you are away from your PC. This is an unofficial community project, not affiliated with DeepSeek.

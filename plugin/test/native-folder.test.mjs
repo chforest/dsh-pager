@@ -12,7 +12,15 @@ test('desktop picker adds only OS-selected directories; cancellation, double tap
   let choose = async () => dir, picks = 0, calls = []
   const upstream = http.createServer(async (req, res) => {
     let raw = ''; for await (const data of req) raw += data
-    const body = JSON.parse(raw); calls.push(body)
+    // The mobile server polls upstream while a slow Windows fixture is running.
+    // Account for that read traffic without counting it as workspace creation.
+    if (!raw) { res.setHeader('content-type', 'application/json'); res.end('[]'); return }
+    const body = JSON.parse(raw)
+    if (body.method === 'session.list' || body.method === 'workspace.list') {
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({type:'server-response',rpcId:body.rpcId,result:{ok:true,value:[]}})); return
+    }
+    calls.push(body)
     assert.equal(body.method, 'workspace.create')
     res.setHeader('content-type', 'application/json')
     res.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { created: true, workspace: { workspaceId: 'w1', path: body.payload.path, title: 'test' } } } }))

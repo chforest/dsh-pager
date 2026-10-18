@@ -7,7 +7,7 @@ const ACTIONS=['create','update','pause','resume','run','archive']
 const RANK={'read-only':0,'workspace-write':1,'danger-full-access':2}
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const fail=(message,status=400)=>{throw Object.assign(new Error(message),{status})}
-export const guidance='用户要求定时、每日/每周、周期执行或自动拆解持续推进时，使用 automatic_tasks_list 与 automatic_tasks_manage 管理已安装的任务服务，不要声称没有任务插件或另外编造定时脚本。日期时间面向用户直接使用nowBeijing和nextRunAtBeijing，不把UTC日期原样当北京时间，也不自行心算转换。所有任务默认在安排它的原聊天执行并回复，直接沿用该聊天上下文；原聊天忙时等待，不另开聊天或打断当前工作。独立任务页创建且没有来源聊天的任务只创建一次固定聊天，以后复用。先查现有任务避免重复；创建返回的持久化任务编号和nextRunAt才是创建证据。manual创建不会立即运行，需用户已要求立即执行时另用run；每日多个时间可创建多条明确任务。权限不得高于当前会话；定时/持续任务不增加外部发送、发布、付款或删除授权。未知结果先list核对，确需重试时复用原requestId和内容，不盲目新建。'
+export const guidance='用户要求定时、每日/每周、周期执行或自动拆解持续推进时，使用 automatic_tasks_list 与 automatic_tasks_manage 管理已安装的任务服务，不要声称没有任务插件或另外编造定时脚本。日期时间面向用户直接使用nowBeijing和nextRunAtBeijing，不把UTC日期原样当北京时间，也不自行心算转换。所有任务默认在安排它的原聊天执行并回复，直接沿用该聊天上下文；原聊天忙时等待，不另开聊天或打断当前工作。waiting-idle表示等待原聊天空闲或停止目标清理，不代表定时器冻结；先核对目标和任务占用，不要据此反复新建或重启。独立任务页创建且没有来源聊天的任务只创建一次固定聊天，以后复用。先查现有任务避免重复；创建返回的持久化任务编号和nextRunAt才是创建证据。manual创建不会立即运行，需用户已要求立即执行时另用run；每日多个时间可创建多条明确任务。权限不得高于当前会话；定时/持续任务不增加外部发送、发布、付款或删除授权。未知结果先list核对，确需重试时复用原requestId和内容，不盲目新建。'
 
 function caller(ctx,exec){
   const agent=exec?.agent,sid=agent?.session?.id||agent?.id

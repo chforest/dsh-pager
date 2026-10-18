@@ -15,7 +15,8 @@ function setup(t, extra = {}) {
 }
 test('active waiter receives one answer without late prompt and creation is idempotent', async t => {
   let calls = 0
-  const { store } = setup(t, { deliver: async () => { calls++; return { status: 'accepted' } } })
+  // Test the active-waiter branch independently of slow filesystem writes.
+  const { store } = setup(t, { now: () => 1000, deliver: async () => { calls++; return { status: 'accepted' } } })
   const request = input({ requestId: crypto.randomUUID() }), record = store.create(request)
   assert.deepEqual(store.create(request), record)
   assert.ok(Number.isFinite(Date.parse(record.deadline))); assert.equal(record.status, 'waiting')

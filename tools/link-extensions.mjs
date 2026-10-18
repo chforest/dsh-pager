@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {fileURLToPath} from 'node:url'
-export const modules=['plugin','recovery-host','tasks-host','async-question-host','files-host','screenshot-host','suggestions-host','market-host','antigravity-cli-host']
+export const modules=['plugin','recovery-host','tasks-host','async-question-host','files-host','screenshot-host','suggestions-host','task-timeline-host','market-host','antigravity-cli-host']
 export function linkExtensions(root,profile,{dryRun=false}={}){
   if(!fs.existsSync(path.join(profile,'package.json')))throw Error('Choose an existing DSH profile with --profile <directory>')
   const plans=modules.map(dir=>{const target=path.join(root,dir);const pkg=JSON.parse(fs.readFileSync(path.join(target,'package.json')));const link=path.join(profile,'node_modules',pkg.name);return{dir,target,link,name:pkg.name}})

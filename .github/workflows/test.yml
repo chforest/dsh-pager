@@ -26,7 +26,10 @@ jobs:
       - name: tools tests
         run: node --test tools/*.test.mjs
       - name: extension tests
-        run: node --test async-question-host/*.test.mjs tasks-host/*.test.mjs recovery-host/*.test.mjs files-host/*.test.mjs screenshot-host/*.test.mjs suggestions-host/*.test.mjs antigravity-cli-host/*.test.mjs voice-extension/test/*.test.mjs market-extension/*.test.mjs
+        run: node --test async-question-host/*.test.mjs tasks-host/*.test.mjs recovery-host/*.test.mjs files-host/*.test.mjs screenshot-host/*.test.mjs suggestions-host/*.test.mjs task-timeline-host/*.test.mjs antigravity-cli-host/*.test.mjs voice-extension/test/*.test.mjs market-extension/*.test.mjs
+      - name: Windows native file helper compile and error receipt
+        if: runner.os == 'Windows'
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File files-host/compile-helper.test.ps1
       - name: release privacy gate
         run: node tools/check-release.mjs
 
