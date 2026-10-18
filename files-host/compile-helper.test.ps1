@@ -4,8 +4,12 @@ $compiler=Join-Path $env:SystemRoot 'Microsoft.NET/Framework64/v4.0.30319/csc.ex
 if(-not (Test-Path -LiteralPath $compiler)) { $compiler=Join-Path $env:SystemRoot 'Microsoft.NET/Framework/v4.0.30319/csc.exe' }
 $source=Join-Path $PSScriptRoot 'FileAction.cs'
 $output=Join-Path ([IO.Path]::GetTempPath()) ('dsh-file-action-compile-'+[guid]::NewGuid().ToString('N')+'.exe')
+$probe=$output+'.cs'
 try {
-  & $compiler /nologo /target:winexe /optimize+ /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "/out:$output" $source
+  # Diagnostics only for this synthetic missing-file fixture, never production.
+  $code=[IO.File]::ReadAllText($source).Replace('error.GetType().Name+" hresult="+error.HResult','error.GetType().Name+" hresult="+error.HResult+" test-detail="+error.ToString()')
+  [IO.File]::WriteAllText($probe,$code,[Text.UTF8Encoding]::new($false))
+  & $compiler /nologo /target:winexe /optimize+ /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "/out:$output" $probe
   if($LASTEXITCODE -ne 0){throw 'Native helper compilation failed'}
   $bytes=[IO.File]::ReadAllBytes($output)
   $pe=[BitConverter]::ToInt32($bytes,0x3c)
@@ -33,4 +37,4 @@ try {
     if($diagnostic -notmatch '^FILE_ACTION_ERROR type=FileNotFoundException hresult=-?\d+') {throw ('Unexpected safe exception diagnostic: '+$diagnostic.Trim())}
     Write-Output 'PASS: GUI subsystem compiled; no-console nonexistent-file execution returned JSON failure and exit 1; no dialog or real file action invoked'
   } finally { $process.Dispose() }
-} finally { if(Test-Path -LiteralPath $output){Remove-Item -LiteralPath $output} }
+} finally { if(Test-Path -LiteralPath $output){Remove-Item -LiteralPath $output}; if(Test-Path -LiteralPath $probe){Remove-Item -LiteralPath $probe} }
