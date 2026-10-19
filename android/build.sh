@@ -20,8 +20,8 @@
 # otherwise Android refuses to install over the existing app.
 set -euo pipefail
 
-VERSION_CODE=16
-VERSION_NAME=1.6.1
+VERSION_CODE=17
+VERSION_NAME=1.6.3-multi
 
 MODE=${1:-private}
 SRC=$(cd "$(dirname "$0")" && pwd)

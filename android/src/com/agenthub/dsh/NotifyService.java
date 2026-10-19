@@ -67,9 +67,17 @@ public class NotifyService extends Service {
     static volatile boolean appVisible;
 
     private volatile boolean running;
-    private volatile HttpURLConnection live;
     private volatile boolean loginNotified;
-    private Thread worker;
+    /** One stream per saved computer: origin -> the connection currently open. */
+    private final java.util.Map<String, HttpURLConnection> live = new java.util.concurrent.ConcurrentHashMap<>();
+    /** origin -> its thread, so switching hosts starts and stops only what changed. */
+    private final java.util.Map<String, Thread> workers = new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * The computer whose frame is being handled on this thread. Notification
+     * taps and reply buttons carry it, so a notice always returns to the host
+     * that produced it even while another one is on screen.
+     */
+    private static final ThreadLocal<String> FRAME_HOST = new ThreadLocal<>();
     private SharedPreferences prefs;
     private NotificationManager nm;
     private ConnectivityManager cm;
@@ -102,8 +110,7 @@ public class NotifyService extends Service {
         if (Build.VERSION.SDK_INT >= 34) startForeground(ID_BG, keepalive(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(ID_BG, keepalive());
         running = true;
-        worker = new Thread(this::loop, "dsh-notify");
-        worker.start();
+        reconcile();
         // A new default network (Wi-Fi <-> mobile) silently kills the old TCP
         // connection; reconnect at once instead of waiting for the read timeout.
         cm = getSystemService(ConnectivityManager.class);
@@ -137,6 +144,7 @@ public class NotifyService extends Service {
         } else if (ACTION_RECONNECT.equals(a)) {
             alerted.clear();
             kick();
+            reconcile();
         }
         return START_STICKY;
     }
@@ -159,50 +167,85 @@ public class NotifyService extends Service {
     }
 
     private void kick() {
-        HttpURLConnection c = live;
-        if (c != null) c.disconnect();
-        if (worker != null) worker.interrupt();
+        for (HttpURLConnection c : live.values()) {
+            try {
+                c.disconnect();
+            } catch (Exception ignored) {
+            }
+        }
+        for (Thread t : workers.values()) t.interrupt();
+    }
+
+    /**
+     * Keep exactly one stream per saved computer. Called on start, on reconnect
+     * and after the host list changes, so adding a computer starts watching it
+     * without disturbing the others.
+     */
+    private synchronized void reconcile() {
+        java.util.List<String> wanted = new java.util.ArrayList<>();
+        for (Hosts.Host h : Hosts.read(prefs)) wanted.add(h.origin);
+        for (String origin : new java.util.ArrayList<>(workers.keySet())) {
+            if (wanted.contains(origin)) continue;
+            Thread t = workers.remove(origin);
+            HttpURLConnection c = live.remove(origin);
+            if (c != null) {
+                try {
+                    c.disconnect();
+                } catch (Exception ignored) {
+                }
+            }
+            if (t != null) t.interrupt();
+        }
+        for (final String origin : wanted) {
+            if (workers.containsKey(origin)) continue;
+            Thread t = new Thread(() -> loop(origin), "dsh-notify");
+            workers.put(origin, t);
+            t.start();
+        }
     }
 
     // ------------------------------------------------------------------ stream
 
-    private void loop() {
+    private void loop(String origin) {
         long backoff = 3000;
-        while (running) {
-            String base = MainActivity.server(this);
-            if (base.isEmpty()) { // not set up yet
-                nap(60000);
-                continue;
-            }
-            try {
-                stream(base, prefs.getString("cookie", ""));
-                backoff = 3000;
-                Log.i(TAG, "stream ended by server");
-            } catch (LoginRequired e) {
-                Log.w(TAG, "login required");
-                link("login");
-                if (!loginNotified) {
-                    loginNotified = true;
-                    simple(ID_LOGIN, CH_ALERT, "DSH 需要重新登录", "登录已过期，点开 App 登录一次即可恢复提醒", null);
+        try {
+            while (running && workers.get(origin) == Thread.currentThread()) {
+                if (origin.isEmpty()) { // not set up yet
+                    nap(60000);
+                    continue;
                 }
-                nap(10 * 60000);
-                continue;
-            } catch (Exception e) {
-                // offline, home PC down, or DSH restarting: retry with backoff
-                link("off");
-                Log.w(TAG, "stream failed: " + e.getClass().getSimpleName() + ": " + e.getMessage() + " (retry in " + backoff / 1000 + "s)");
+                try {
+                    stream(origin, origin, Hosts.cookie(prefs, origin));
+                    backoff = 3000;
+                    Log.i(TAG, "stream ended by server");
+                } catch (LoginRequired e) {
+                    Log.w(TAG, "login required: " + origin);
+                    link("login");
+                    if (!loginNotified) {
+                        loginNotified = true;
+                        simple(idFor("login:" + origin), CH_ALERT, "DSH 需要重新登录", "登录已过期，点开 App 登录一次即可恢复提醒", null);
+                    }
+                    nap(10 * 60000);
+                    continue;
+                } catch (Exception e) {
+                    // offline, home PC down, or DSH restarting: retry with backoff
+                    link("off");
+                    Log.w(TAG, "stream failed: " + origin + " " + e.getClass().getSimpleName() + ": " + e.getMessage() + " (retry in " + backoff / 1000 + "s)");
+                }
+                nap(backoff);
+                backoff = Math.min(backoff * 2, 60000);
             }
-            nap(backoff);
-            backoff = Math.min(backoff * 2, 60000);
+        } finally {
+            workers.remove(origin, Thread.currentThread());
         }
     }
 
-    private void stream(String base, String cookie) throws Exception {
-        String epoch = prefs.getString("epoch", "");
-        long since = prefs.getLong("n", -1);
+    private void stream(String origin, String base, String cookie) throws Exception {
+        String epoch = prefs.getString(Hosts.field(origin, "epoch"), "");
+        long since = prefs.getLong(Hosts.field(origin, "n"), -1);
         URL u = new URL(base + "/m/api/notify?hb=120&since=" + since + "&epoch=" + URLEncoder.encode(epoch, "UTF-8"));
         HttpURLConnection c = (HttpURLConnection) u.openConnection();
-        live = c;
+        live.put(origin, c);
         try {
             c.setInstanceFollowRedirects(false);
             c.setConnectTimeout(15000);
@@ -216,7 +259,7 @@ public class NotifyService extends Service {
             link("ok");
             if (loginNotified) {
                 loginNotified = false;
-                nm.cancel(ID_LOGIN);
+                nm.cancel(idFor("login:" + origin));
             }
             BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
             StringBuilder data = new StringBuilder();
@@ -226,28 +269,31 @@ public class NotifyService extends Service {
                     data.append(line.substring(5).trim());
                 } else if (line.isEmpty() && data.length() > 0) {
                     try {
-                        onFrame(new JSONObject(data.toString()));
+                        onFrame(origin, new JSONObject(data.toString()));
                     } catch (Exception ignored) {
                     }
                     data.setLength(0);
                 }
             }
         } finally {
-            live = null;
+            live.remove(origin, c);
             c.disconnect();
         }
     }
 
-    private void onFrame(JSONObject f) {
+    private void onFrame(String origin, JSONObject f) {
+        FRAME_HOST.set(origin);
         String t = f.optString("t");
         Log.i(TAG, "frame " + t + (f.has("n") ? " n=" + f.optLong("n") : "") + (appVisible ? " (app visible)" : ""));
         if ("hello".equals(t)) {
             String ep = f.optString("epoch");
-            if (!ep.equals(prefs.getString("epoch", ""))) prefs.edit().putString("epoch", ep).putLong("n", -1).apply();
+            if (!ep.equals(prefs.getString(Hosts.field(origin, "epoch"), ""))) {
+                prefs.edit().putString(Hosts.field(origin, "epoch"), ep).putLong(Hosts.field(origin, "n"), -1).apply();
+            }
             return;
         }
         long n = f.optLong("n", -1);
-        if (n > prefs.getLong("n", -1)) prefs.edit().putLong("n", n).apply();
+        if (n > prefs.getLong(Hosts.field(origin, "n"), -1)) prefs.edit().putLong(Hosts.field(origin, "n"), n).apply();
         switch (t) {
             case "st": // counts for the home-screen widget; a snapshot, never numbered
                 prefs.edit().putInt("w_run", f.optInt("run", 0)).putInt("w_asks", f.optInt("asks", 0)).apply();
@@ -320,6 +366,14 @@ public class NotifyService extends Service {
     }
 
     private Notification.Builder base(String channel, String title, String text, String session, int nid) {
+        // With more than one computer saved, say which one is talking.
+        if (workers.size() > 1) {
+            String origin = FRAME_HOST.get();
+            if (origin != null) {
+                Hosts.Host h = Hosts.find(Hosts.read(prefs), origin);
+                if (h != null) title = h.title() + " · " + title;
+            }
+        }
         return new Notification.Builder(this, channel)
                 .setSmallIcon(R.drawable.ic_stat)
                 .setColor(0xFF4D6BFE)
@@ -394,7 +448,8 @@ public class NotifyService extends Service {
                 .putExtra("qid", f.optString("qid"))
                 .putExtra("title", f.optString("title"))
                 .putExtra("nid", nid)
-                .putExtra("slot", slot);
+                .putExtra("slot", slot)
+                .putExtra("host", FRAME_HOST.get());
     }
 
     /** Distinct request code per notification button, so PendingIntents do not overwrite each other. */
@@ -446,6 +501,8 @@ public class NotifyService extends Service {
                 .setAction("open:" + (session == null ? "" : session))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         if (session != null && !session.isEmpty()) i.putExtra("session", session);
+        String origin = FRAME_HOST.get();
+        if (origin != null) i.putExtra("host", origin);
         return PendingIntent.getActivity(this, rc, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
@@ -456,7 +513,8 @@ public class NotifyService extends Service {
                 .putExtra("rpc", f.optString("rpc"))
                 .putExtra("s", f.optString("s"))
                 .putExtra("id", f.optString("id"))
-                .putExtra("nid", nid);
+                .putExtra("nid", nid)
+                .putExtra("host", FRAME_HOST.get());
     }
 
     /** Answer an approval straight from the notification. */
@@ -471,7 +529,7 @@ public class NotifyService extends Service {
             JSONObject body = new JSONObject()
                     .put("rpcId", in.getStringExtra("rpc"))
                     .put("result", new JSONObject().put("ok", true).put("value", value));
-            post("/m/api/respond", body);
+            post(in.getStringExtra("host"), "/m/api/respond", body);
             nm.cancel(nid);
         } catch (Exception e) {
             simple(nid, CH_ALERT, "没有提交成功", "点开 App 处理这个确认", in.getStringExtra("s"));
@@ -496,7 +554,7 @@ public class NotifyService extends Service {
                 ans.put("selected", new JSONArray()).put("custom", text);
             }
             JSONObject value = new JSONObject().put("sessionId", s).put("answer", new JSONObject().put("answers", new JSONArray().put(ans)));
-            post("/m/api/respond", new JSONObject().put("rpcId", in.getStringExtra("rpc")).put("result", new JSONObject().put("ok", true).put("value", value)));
+            post(in.getStringExtra("host"), "/m/api/respond", new JSONObject().put("rpcId", in.getStringExtra("rpc")).put("result", new JSONObject().put("ok", true).put("value", value)));
             nm.cancel(nid);
         } catch (Exception e) {
             simple(nid, CH_ALERT, "没有提交成功", "点开 App 回答这个问题", s);
@@ -514,11 +572,11 @@ public class NotifyService extends Service {
         }
         try {
             if (s.startsWith("agent:")) {
-                post("/m/api/agents/prompt", new JSONObject().put("s", s).put("text", text));
+                post(in.getStringExtra("host"), "/m/api/agents/prompt", new JSONObject().put("s", s).put("text", text));
             } else {
                 JSONObject payload = new JSONObject().put("sessionId", s).put("mode", "queue")
                         .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", text)));
-                post("/m/api/rpc", new JSONObject().put("method", "session.prompt").put("payload", payload));
+                post(in.getStringExtra("host"), "/m/api/rpc", new JSONObject().put("method", "session.prompt").put("payload", payload));
             }
             // Re-post without the input: this is also what stops the notification's reply spinner.
             simple(nid, CH_DONE, in.getStringExtra("title"), "已发送：" + clip(text, 120), s);
@@ -528,14 +586,20 @@ public class NotifyService extends Service {
     }
 
     private JSONObject post(String path, JSONObject body) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(MainActivity.server(this) + path).openConnection();
+        return post(null, path, body);
+    }
+
+    /** Post to the computer that produced the notice, not necessarily the one on screen. */
+    private JSONObject post(String host, String path, JSONObject body) throws Exception {
+        String origin = host == null || host.isEmpty() ? MainActivity.server(this) : host;
+        HttpURLConnection c = (HttpURLConnection) new URL(origin + path).openConnection();
         try {
             c.setInstanceFollowRedirects(false);
             c.setConnectTimeout(15000);
             c.setReadTimeout(30000);
             c.setRequestMethod("POST");
             c.setDoOutput(true);
-            String cookie = prefs.getString("cookie", "");
+            String cookie = Hosts.cookie(prefs, origin);
             if (!cookie.isEmpty()) c.setRequestProperty("Cookie", cookie);
             c.setRequestProperty("Content-Type", "application/json");
             byte[] out = body.toString().getBytes(StandardCharsets.UTF_8);

@@ -27,6 +27,18 @@
   .tips b { color: var(--text); font-weight: 600; }
   .tips code { font-family: ui-monospace, monospace; font-size: 12.5px; background: var(--sunken); padding: 1px 6px; border-radius: 6px; }
   .tips div + div { margin-top: 6px; }
+  .hosts { margin: 0 0 22px; display: none; }
+  .hosts.on { display: block; }
+  .hosts h2 { font-size: 13px; font-weight: 600; color: var(--text2); margin: 0 0 8px; }
+  .host { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 14px; background: var(--surface); }
+  .host + .host { margin-top: 8px; }
+  .host.cur { box-shadow: 0 0 0 2px var(--accent) inset; }
+  .host .who { flex: 1; min-width: 0; }
+  .host .who b { display: block; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .host .who small { display: block; color: var(--text3); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .host a { flex: none; padding: 7px 12px; border-radius: 10px; font-size: 13.5px; text-decoration: none; color: var(--text2); background: var(--sunken); }
+  .host a.go { color: #fff; background: var(--accent); }
+  .host a.del { color: var(--bad); background: transparent; }
 </style>
 </head>
 <body>
@@ -34,11 +46,17 @@
   <div class="logo"><svg viewBox="0 0 24 24"><path d="M6 8l4 4-4 4M13 17h5"/></svg></div>
   <h1>连接你的 DSH</h1>
   <p class="sub">填写电脑上 DeepSeek Harness 的访问地址。之后可以在 App 里随时更换。</p>
+  <div id="list" class="hosts">
+    <h2>已保存的电脑</h2>
+    <div id="rows"></div>
+  </div>
   <form id="f" autocomplete="off" novalidate>
     <label for="u">服务器地址</label>
     <input id="u" type="text" inputmode="url" placeholder="https://dsh.example.com:8443" enterkeyhint="go" autocapitalize="off" spellcheck="false">
+    <label for="n" style="margin-top:14px">备注（可选）</label>
+    <input id="n" type="text" placeholder="工作室、家里、笔电…" maxlength="24" autocapitalize="off" spellcheck="false">
     <div id="m" class="msg"></div>
-    <button type="submit">连接</button>
+    <button type="submit">保存并连接</button>
   </form>
   <div class="tips">
     <div><b>自建登录网关</b>（推荐）：<code>https://你的域名:端口</code></div>
@@ -57,11 +75,28 @@
       msg.className = 'msg warn'; msg.textContent = 'http 明文只适合异地组网或局域网内使用；公网请用 https'
     } else { msg.className = 'msg'; msg.textContent = '' }
   }
+  var name = document.getElementById('n'), rows = document.getElementById('rows'), list = document.getElementById('list')
+  function esc(t) { return String(t).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] }) }
+  try {
+    var saved = JSON.parse(q.get('hosts') || '[]')
+    if (saved.length) {
+      list.className = 'hosts on'
+      rows.innerHTML = saved.map(function (h) {
+        var title = h.label || h.origin.replace(/^https?:\/\//i, '')
+        var sub = h.label ? h.origin.replace(/^https?:\/\//i, '') : ''
+        return '<div class="host' + (h.active ? ' cur' : '') + '"><div class="who"><b>' + esc(title) + '</b>'
+          + (sub ? '<small>' + esc(sub) + '</small>' : '')
+          + '</div><a class="go" href="dshapp://setup?select=' + encodeURIComponent(h.origin) + '">' + (h.active ? '当前' : '连接') + '</a>'
+          + '<a class="del" href="dshapp://setup?remove=' + encodeURIComponent(h.origin) + '">删除</a></div>'
+      }).join('')
+    }
+  } catch (e) {}
   document.getElementById('f').onsubmit = function (e) {
     e.preventDefault()
     var v = input.value.trim()
     if (!v || v === 'https://' || v === 'http://') { showError('请先填写地址'); return }
     location.href = 'dshapp://setup?server=' + encodeURIComponent(v)
+      + (name.value.trim() ? '&label=' + encodeURIComponent(name.value.trim()) : '')
   }
   input.oninput()
   if (q.get('error')) showError('地址格式不对，例：https://dsh.example.com:8443')

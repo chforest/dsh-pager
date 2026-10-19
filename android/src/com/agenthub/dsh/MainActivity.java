@@ -89,10 +89,9 @@ public class MainActivity extends Activity {
     int fullscreenOrientation;
     boolean wasFullscreen;
 
-    /** The configured server origin, e.g. https://dsh.example.com:8443 — or "" before setup. */
+    /** The origin on screen, e.g. https://dsh.example.com:8443 — or "" before setup. */
     static String server(Context c) {
-        String s = c.getSharedPreferences("dsh", MODE_PRIVATE).getString("server", "");
-        return s.isEmpty() ? c.getString(R.string.default_server).trim() : s;
+        return Hosts.active(c.getSharedPreferences("dsh", MODE_PRIVATE), c.getString(R.string.default_server).trim());
     }
 
     String home() {
@@ -104,6 +103,9 @@ public class MainActivity extends Activity {
         super.onCreate(saved);
         downloadActivity = new java.lang.ref.WeakReference<>(this);
         prefs = getSharedPreferences("dsh", MODE_PRIVATE);
+        // A notification may come from a computer that is not the one on screen.
+        String fromNotice = getIntent().getStringExtra("host");
+        if (fromNotice != null && !fromNotice.isEmpty() && !fromNotice.equals(Hosts.active(prefs, ""))) Hosts.activate(prefs, fromNotice);
         // Private builds let `adb forward ... webview_devtools_remote` inspect the page (authorised USB
         // debugging only). Public builds keep it off: DevTools can read the gateway cookie and drive DSH.
         WebView.setWebContentsDebuggingEnabled(BuildInfo.WEBVIEW_DEBUG);
@@ -354,9 +356,16 @@ public class MainActivity extends Activity {
             return;
         }
         if (!"setup".equals(u.getHost())) return;
+        String page = v.getUrl();
+        // Opening the list is harmless from any page ("切换服务器"); only the
+        // bundled form may add, remove or repoint us at another computer.
+        boolean fromForm = page != null && page.startsWith(SETUP);
+        String select = u.getQueryParameter("select");
+        if (select != null) { if (fromForm) switchTo(v, select); return; }
+        String remove = u.getQueryParameter("remove");
+        if (remove != null) { if (fromForm) { Hosts.remove(prefs, remove); NotifyService.reconnect(this); showSetup(v); } return; }
         String entered = u.getQueryParameter("server");
-        String current = v.getUrl();
-        if (entered != null && current != null && current.startsWith(SETUP)) {
+        if (entered != null && fromForm) {
             String origin = normalize(entered);
             if (origin == null) {
                 // Reload the form with the error rather than injecting script from
@@ -365,15 +374,44 @@ public class MainActivity extends Activity {
                 v.loadUrl(SETUP + "?error=1&value=" + Uri.encode(entered));
                 return;
             }
-            if (!origin.equals(prefs.getString("server", ""))) {
-                prefs.edit().putString("server", origin).putString("cookie", "").remove("epoch").putLong("n", -1).apply();
-                NotifyService.reconnect(this);
-            }
+            Hosts.add(prefs, origin, u.getQueryParameter("label"));
+            NotifyService.reconnect(this);
             v.loadUrl(origin + "/m/");
             return;
         }
-        String s = server(this);
-        v.loadUrl(SETUP + (s.isEmpty() ? "" : "?current=" + Uri.encode(s)));
+        showSetup(v);
+    }
+
+    /** The saved host list, with the one on screen marked, rendered by the bundled page. */
+    void showSetup(WebView v) {
+        String active = server(this);
+        org.json.JSONArray a = new org.json.JSONArray();
+        for (Hosts.Host h : Hosts.read(prefs)) {
+            try {
+                a.put(new org.json.JSONObject()
+                        .put("origin", h.origin)
+                        .put("label", h.label)
+                        .put("active", h.origin.equals(active)));
+            } catch (Exception ignored) {
+            }
+        }
+        StringBuilder url = new StringBuilder(SETUP);
+        char sep = '?';
+        if (!active.isEmpty()) { url.append(sep).append("current=").append(Uri.encode(active)); sep = '&'; }
+        if (a.length() > 0) url.append(sep).append("hosts=").append(Uri.encode(a.toString()));
+        v.loadUrl(url.toString());
+    }
+
+    /**
+     * Bring a saved host on screen. Cookies stay per-origin in the WebView, so
+     * switching never rewrites another computer's login.
+     */
+    void switchTo(WebView v, String origin) {
+        if (!origin.equals(Hosts.active(prefs, ""))) {
+            Hosts.activate(prefs, origin);
+            NotifyService.reconnect(this);
+        }
+        v.loadUrl(origin + "/m/");
     }
 
     /** "host:port" or a full URL -> "scheme://host[:port]"; null if unusable. */
@@ -405,9 +443,12 @@ public class MainActivity extends Activity {
 
     /** Hands the server's cookies (an auth gateway's session, if any) to NotifyService. */
     void saveCookie() {
-        String c = CookieManager.getInstance().getCookie(server(this) + "/");
+        String origin = server(this);
+        String c = CookieManager.getInstance().getCookie(origin + "/");
         c = c == null ? "" : c;
-        if (!c.equals(prefs.getString("cookie", ""))) prefs.edit().putString("cookie", c).apply();
+        // Per host: the notification stream for each computer needs its own
+        // cookie, and switching hosts must not erase the other one.
+        if (!c.equals(Hosts.cookie(prefs, origin))) prefs.edit().putString(Hosts.field(origin, "cookie"), c).apply();
     }
 
     /**
@@ -678,6 +719,14 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        // A notice tapped while another computer was on screen: follow it there.
+        String host = intent.getStringExtra("host");
+        if (host != null && !host.isEmpty() && !host.equals(Hosts.active(prefs, ""))) {
+            Hosts.activate(prefs, host);
+            exitFullscreen();
+            web.loadUrl(host + "/m/");
+            return;
+        }
         String s = intent.getStringExtra("session");
         if (s != null && !s.isEmpty()) exitFullscreen();
         if (s != null) web.evaluateJavascript("window.dshOpen&&window.dshOpen(" + JSONObject.quote(s) + ")", null);
