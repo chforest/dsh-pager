@@ -20,8 +20,14 @@
 # otherwise Android refuses to install over the existing app.
 set -euo pipefail
 
-VERSION_CODE=17
-VERSION_NAME=1.6.3-multi
+# The fork ships every build under its own version: the code is the current
+# second (monotonic, still inside int32 until 2038, so an install always counts
+# as an update) and the name
+# carries the build time so the phone's "about" line identifies the APK.
+# dsh-pager-v<BASE>.apk keeps a stable file name for links and the in-app update.
+BASE=1.6.3-multi
+VERSION_CODE=$(date +%s)
+VERSION_NAME="$BASE.$(date +%y%m%d-%H%M%S)"
 
 MODE=${1:-private}
 SRC=$(cd "$(dirname "$0")" && pwd)
@@ -93,7 +99,7 @@ if [ ! -f "$KS" ]; then
   echo "      new signing key: $KS"
 fi
 NAME=DSH.apk
-[ "$MODE" = "public" ] && NAME=dsh-pager-v$VERSION_NAME.apk
+[ "$MODE" = "public" ] && NAME=dsh-pager-v$BASE.apk
 "$JDK/bin/java" -jar "$BT/lib/apksigner.jar" sign --ks "$(win "$KS")" --ks-key-alias dsh \
   --ks-pass "file:$(win "$KSPASS_FILE")" --out "$(win "$OUT/$NAME")" app.aligned.apk
 "$JDK/bin/java" -jar "$BT/lib/apksigner.jar" verify "$(win "$OUT/$NAME")"
