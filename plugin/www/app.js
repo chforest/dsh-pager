@@ -2828,25 +2828,66 @@
 
   // ------------------------------------------------------------ computers
   // The shell injects window.__dshHosts after /m/ loads (MainActivity.pushHosts).
-  // With one computer saved there is nothing to switch, so the chip stays hidden.
+  // One pill per saved computer: a single tap switches, no sheet in the way.
   function hostList() {
     return Array.isArray(window.__dshHosts) ? window.__dshHosts : []
   }
+  function hostName(h) {
+    return h.title || h.label || String(h.origin || '').replace(/^https?:\/\//i, '')
+  }
+  function activeHost() {
+    var list = hostList()
+    return list.filter(function (h) { return h.active })[0] || list[0]
+  }
   function paintHost() {
-    var b = document.getElementById('host'), list = hostList()
-    if (!b) return
-    if (list.length < 2) { b.hidden = true; return }
-    var cur = list.filter(function (h) { return h.active })[0] || list[0]
-    b.textContent = cur.title || cur.label || cur.origin.replace(/^https?:\/\//i, '')
-    b.hidden = false
+    var list = hostList(), bars = document.querySelectorAll('.hostbar')
+    if (!bars.length) return
+    var cur = activeHost()
+    var show = list.length > 1
+    Array.prototype.forEach.call(bars, function (bar) {
+      bar.hidden = !show
+      if (!show) { bar.innerHTML = ''; return }
+      // Up to four computers stay one tap away; past that the bar would become a
+      // scroller you have to hunt in, so it shows the active one plus 切换.
+      var shown = list.length > 4 ? [cur] : list
+      bar.innerHTML = shown.map(function (h) {
+        return '<button class="hp' + (h.active ? ' on' : '') + '" data-hop="' + esc(h.origin) + '">' + esc(hostName(h)) + '</button>'
+      }).join('') + '<button class="hp man" data-homan aria-label="管理电脑">' + (list.length > 4 ? '切换…' : '⋯') + '</button>'
+    })
   }
   window.dshHostsChanged = paintHost
-  document.getElementById('host').onclick = function () {
+  Array.prototype.forEach.call(document.querySelectorAll('.hostbar'), function (bar) {
+    bar.onclick = function (e) {
+      var b = e.target.closest('[data-hop]')
+      if (b) {
+        var origin = b.dataset.hop, cur = activeHost()
+        // Tapping the computer you are already on is the way into management.
+        if (origin && (!cur || origin !== cur.origin)) {
+          var target = list.filter(function (h) { return h.origin === origin })[0]
+          switching(target ? hostName(target) : origin)
+          location.href = 'dshapp://setup?select=' + encodeURIComponent(origin)
+          return
+        }
+        hostSheet(); return
+      }
+      if (e.target.closest('[data-homan]')) hostSheet()
+    }
+  })
+  /** Cover the page while the other computer loads, so the tap is visibly taken. */
+  function switching(name) {
+    if (document.querySelector('.switching')) return
+    var d = document.createElement('div')
+    d.className = 'switching'
+    d.innerHTML = '<div><span class="spin"></span><b>正在切换到 ' + esc(name) + '</b>连上之后会回到你上次看到的对话</div>'
+    document.body.appendChild(d)
+    setTimeout(function () { if (d.parentNode && !document.hidden) d.parentNode.removeChild(d) }, 12000)
+  }
+  function hostSheet() {
     var list = hostList()
     openSheet('<div class="sh-h">切换电脑<small>' + esc(location.host) + '</small></div><div class="sh-b">' +
       list.map(function (h) {
         return '<button class="opt-row" data-host="' + esc(h.origin) + '"><span class="ico">' + ic(h.active ? 'checkc' : 'web', 's') + '</span>' +
-          '<span class="mid"><b>' + esc(h.title || h.label || h.origin) + '</b><small>' + esc(h.origin.replace(/^https?:\/\//i, '')) + '</small></span>' +
+          '<span class="mid"><b>' + esc(hostName(h)) + '</b><small>' + esc(String(h.origin || '').replace(/^https?:\/\//i, '')) + '</small></span>' +
           (h.active ? '<small class="cur">当前</small>' : ic('chev', 's')) + '</button>'
       }).join('') +
       '<button class="opt-row" data-host-add><span class="ico">' + ic('plus', 's') + '</span><span class="mid"><b>添加电脑</b><small>填另一台 DSH 的地址</small></span>' + ic('chev', 's') + '</button></div>')

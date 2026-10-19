@@ -275,11 +275,20 @@ input, textarea { font: inherit; color: inherit; }
 .pill { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px; border-radius: 14px; background: var(--surface); box-shadow: 0 0 0 1px var(--line) inset; font-size: 13.5px; color: var(--text2); text-align: left; }
 .pill b { color: var(--text); font-weight: 600; white-space: nowrap; }
 .pill span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* Multi-computer: the current host's name sits in the chat header and opens
-   a one-tap switcher. Hidden unless more than one computer is saved. */
-.host-ib { flex: none; max-width: 92px; height: 30px; padding: 0 10px; border: 0; border-radius: 15px; background: var(--surface); box-shadow: 0 0 0 1px var(--line) inset; color: var(--text2); font: 600 12.5px/1 system-ui, sans-serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.host-ib:active { opacity: .7; }
+/* Multi-computer: one pill per saved computer, one tap to switch. The bar only
+   exists when more than one is saved, so a single-computer setup sees nothing. */
+.hostbar { display: flex; gap: 6px; align-items: center; padding: 0 16px 8px; overflow-x: auto; scrollbar-width: none; flex: none; }
+.hostbar::-webkit-scrollbar { display: none; }
+.hp { flex: none; height: 28px; padding: 0 12px; border: 0; border-radius: 14px; background: var(--surface); box-shadow: 0 0 0 1px var(--line) inset; color: var(--text2); font: 600 12.5px/1 system-ui, sans-serif; white-space: nowrap; }
+.hp.on { background: var(--accent, #4d6bfe); color: #fff; box-shadow: none; }
+.hp:active { opacity: .75; }
+.hp.man { color: var(--text3, var(--text2)); box-shadow: none; background: transparent; padding: 0 8px; }
 .opt-row .cur { flex: none; color: var(--text2); font-size: 12.5px; }
+/* Switching computers reloads /m/ from the other origin; acknowledge the tap so
+   a one-second load never reads as "nothing happened". */
+.switching { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; background: var(--bg); color: var(--text2); font: 15px/1.6 system-ui, sans-serif; text-align: center; padding: 24px; }
+.switching b { display: block; color: var(--text); font-size: 17px; margin-bottom: 6px; }
+.switching .spin { margin: 0 auto 14px; }
 .bar-p { width: 44px; height: 5px; border-radius: 3px; background: var(--sunken); overflow: hidden; flex: none; }
 .bar-p i { display: block; height: 100%; background: var(--ok); border-radius: 3px; }
 .todos { padding: 4px 4px 2px; }
