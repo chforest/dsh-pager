@@ -75,7 +75,8 @@
       msg.className = 'msg warn'; msg.textContent = 'http 明文只适合异地组网或局域网内使用；公网请用 https'
     } else { msg.className = 'msg'; msg.textContent = '' }
   }
-  var name = document.getElementById('n'), rows = document.getElementById('rows'), list = document.getElementById('list')
+  // Not `name`: that is window.name (a string), so `name.value` would be undefined.
+  var note = document.getElementById('n'), rows = document.getElementById('rows'), list = document.getElementById('list')
   function esc(t) { return String(t).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] }) }
   try {
     var saved = JSON.parse(q.get('hosts') || '[]')
@@ -95,8 +96,9 @@
     e.preventDefault()
     var v = input.value.trim()
     if (!v || v === 'https://' || v === 'http://') { showError('请先填写地址'); return }
+    var label = note ? note.value.trim() : ''
     location.href = 'dshapp://setup?server=' + encodeURIComponent(v)
-      + (name.value.trim() ? '&label=' + encodeURIComponent(name.value.trim()) : '')
+      + (label ? '&label=' + encodeURIComponent(label) : '')
   }
   input.oninput()
   if (q.get('error')) showError('地址格式不对，例：https://dsh.example.com:8443')
