@@ -130,6 +130,17 @@ final class Hosts {
         return p.getString(field(origin, "cookie"), "");
     }
 
+    /**
+     * Give a build-time preset (DSH_DEFAULT_SERVER) a real entry, so it shows up
+     * in the list, gets a notification stream, and can be switched away from.
+     */
+    static void seed(SharedPreferences p, String fallback) {
+        if (fallback == null || fallback.isEmpty()) return;
+        if (p.getString(ACTIVE, "") != null && !p.getString(ACTIVE, "").isEmpty()) return;
+        if (!read(p).isEmpty()) return;
+        add(p, fallback, "");
+    }
+
     private static void migrate(SharedPreferences p) {
         String legacy = p.getString(ACTIVE, "");
         if (legacy == null || legacy.isEmpty()) return;

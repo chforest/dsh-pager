@@ -103,6 +103,7 @@ public class MainActivity extends Activity {
         super.onCreate(saved);
         downloadActivity = new java.lang.ref.WeakReference<>(this);
         prefs = getSharedPreferences("dsh", MODE_PRIVATE);
+        Hosts.seed(prefs, getString(R.string.default_server).trim());
         // A notification may come from a computer that is not the one on screen.
         String fromNotice = getIntent().getStringExtra("host");
         if (fromNotice != null && !fromNotice.isEmpty() && !fromNotice.equals(Hosts.active(prefs, ""))) Hosts.activate(prefs, fromNotice);
@@ -157,6 +158,7 @@ public class MainActivity extends Activity {
                 CookieManager.getInstance().flush();
                 if (app) { // reaching /m/ means the server (and any gateway login) accepts us
                     saveCookie();
+                    pushHosts();
                     NotifyService.start(MainActivity.this);
                     if (resumed) askPermissions();
                     appReady = true;
@@ -376,14 +378,15 @@ public class MainActivity extends Activity {
             }
             Hosts.add(prefs, origin, u.getQueryParameter("label"));
             NotifyService.reconnect(this);
+            pushHosts();
             v.loadUrl(origin + "/m/");
             return;
         }
         showSetup(v);
     }
 
-    /** The saved host list, with the one on screen marked, rendered by the bundled page. */
-    void showSetup(WebView v) {
+    /** The saved hosts as the page sees them: origin, label, and which one is on screen. */
+    org.json.JSONArray hostsJson() {
         String active = server(this);
         org.json.JSONArray a = new org.json.JSONArray();
         for (Hosts.Host h : Hosts.read(prefs)) {
@@ -391,10 +394,25 @@ public class MainActivity extends Activity {
                 a.put(new org.json.JSONObject()
                         .put("origin", h.origin)
                         .put("label", h.label)
+                        .put("title", h.title())
                         .put("active", h.origin.equals(active)));
             } catch (Exception ignored) {
             }
         }
+        return a;
+    }
+
+    /** Hand the page its host list, so the chat header can switch without a trip to settings. */
+    void pushHosts() {
+        if (web == null) return;
+        String js = "window.__dshHosts=" + hostsJson() + ";(window.dshHostsChanged||function(){})()";
+        web.evaluateJavascript(js, null);
+    }
+
+    /** The saved host list, with the one on screen marked, rendered by the bundled page. */
+    void showSetup(WebView v) {
+        String active = server(this);
+        org.json.JSONArray a = hostsJson();
         StringBuilder url = new StringBuilder(SETUP);
         char sep = '?';
         if (!active.isEmpty()) { url.append(sep).append("current=").append(Uri.encode(active)); sep = '&'; }
@@ -411,6 +429,7 @@ public class MainActivity extends Activity {
             Hosts.activate(prefs, origin);
             NotifyService.reconnect(this);
         }
+        pushHosts();
         v.loadUrl(origin + "/m/");
     }
 

@@ -50,8 +50,9 @@ KSPASS_FILE=$SRC/keystore/password.txt
 # drive. Hand the signer explicit Windows paths.
 win() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else echo "$1"; fi; }
 
-SERVER=""
-[ "$MODE" != "public" ] && SERVER=$(prop DSH_DEFAULT_SERVER)
+# A personal build can ship its own address; source keeps the default empty so a
+# public build without local.properties still asks on first launch.
+SERVER=$(prop DSH_DEFAULT_SERVER)
 
 # The project path may contain non-ASCII characters; every tool runs from an
 # ASCII-only work dir and only the signed APK is copied back.
