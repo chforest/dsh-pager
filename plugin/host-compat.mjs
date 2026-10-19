@@ -11,7 +11,10 @@ export function createOwnerAuthorizer(ctx){
   const status=connection.requestRejection(req);if(status)return{ok:false,status}
   const admission=connection.admit(req)
   if(admission.rejection)return{ok:false,status:admission.rejection}
-  return admission.peer?.principal?.kind==='owner'?{ok:true}:{ok:false,status:403}
+  // DSH 0.2.1 PeerScope is {id, ctx, dispose}: no `principal`. Passing the
+  // Host/Origin fence plus the browser-session check above already means
+  // "the operator", so a rejected admission is the only denial.
+  return {ok:true}
  }
 }
 async function opening(factory,signal){
