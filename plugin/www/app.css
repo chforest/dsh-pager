@@ -275,6 +275,11 @@ input, textarea { font: inherit; color: inherit; }
 .pill { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px; border-radius: 14px; background: var(--surface); box-shadow: 0 0 0 1px var(--line) inset; font-size: 13.5px; color: var(--text2); text-align: left; }
 .pill b { color: var(--text); font-weight: 600; white-space: nowrap; }
 .pill span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Multi-computer: the current host's name sits in the chat header and opens
+   a one-tap switcher. Hidden unless more than one computer is saved. */
+.host-ib { flex: none; max-width: 92px; height: 30px; padding: 0 10px; border: 0; border-radius: 15px; background: var(--surface); box-shadow: 0 0 0 1px var(--line) inset; color: var(--text2); font: 600 12.5px/1 system-ui, sans-serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.host-ib:active { opacity: .7; }
+.opt-row .cur { flex: none; color: var(--text2); font-size: 12.5px; }
 .bar-p { width: 44px; height: 5px; border-radius: 3px; background: var(--sunken); overflow: hidden; flex: none; }
 .bar-p i { display: block; height: 100%; background: var(--ok); border-radius: 3px; }
 .todos { padding: 4px 4px 2px; }

@@ -2825,6 +2825,42 @@
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') { stopVoice(); stopVoicePreview() } })
   window.addEventListener('pagehide', function () { stopVoice(); stopVoicePreview() })
   document.getElementById('more').onclick = moreSheet
+
+  // ------------------------------------------------------------ computers
+  // The shell injects window.__dshHosts after /m/ loads (MainActivity.pushHosts).
+  // With one computer saved there is nothing to switch, so the chip stays hidden.
+  function hostList() {
+    return Array.isArray(window.__dshHosts) ? window.__dshHosts : []
+  }
+  function paintHost() {
+    var b = document.getElementById('host'), list = hostList()
+    if (!b) return
+    if (list.length < 2) { b.hidden = true; return }
+    var cur = list.filter(function (h) { return h.active })[0] || list[0]
+    b.textContent = cur.title || cur.label || cur.origin.replace(/^https?:\/\//i, '')
+    b.hidden = false
+  }
+  window.dshHostsChanged = paintHost
+  document.getElementById('host').onclick = function () {
+    var list = hostList()
+    openSheet('<div class="sh-h">切换电脑<small>' + esc(location.host) + '</small></div><div class="sh-b">' +
+      list.map(function (h) {
+        return '<button class="opt-row" data-host="' + esc(h.origin) + '"><span class="ico">' + ic(h.active ? 'checkc' : 'web', 's') + '</span>' +
+          '<span class="mid"><b>' + esc(h.title || h.label || h.origin) + '</b><small>' + esc(h.origin.replace(/^https?:\/\//i, '')) + '</small></span>' +
+          (h.active ? '<small class="cur">当前</small>' : ic('chev', 's')) + '</button>'
+      }).join('') +
+      '<button class="opt-row" data-host-add><span class="ico">' + ic('plus', 's') + '</span><span class="mid"><b>添加电脑</b><small>填另一台 DSH 的地址</small></span>' + ic('chev', 's') + '</button></div>')
+    el.sheet.onclick = function (e) {
+      var b = e.target.closest('[data-host]')
+      if (b) {
+        var origin = b.dataset.host
+        if (origin) { closeOverlay(); location.href = 'dshapp://setup?select=' + encodeURIComponent(origin) }
+        return
+      }
+      if (e.target.closest('[data-host-add]')) { closeOverlay(); location.href = 'dshapp://setup' }
+    }
+  }
+  paintHost()
   el.sheetWrap.firstElementChild.onclick = function () { closeOverlay() }
   el.viewer.onclick = function () { closeOverlay() }
   document.getElementById('fvBack').onclick = function () { history.back() }
