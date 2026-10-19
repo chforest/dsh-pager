@@ -1,3 +1,11 @@
+# 未发布 — chforest fork
+
+- **修复：绑定非回环地址时，审批 / 提问的回答送不回 DSH**。内部调用原写死 `127.0.0.1`，而 `--host 10.x.x.x` 时回环根本不监听，回答一律 502、手机显示「家里电脑暂时连不上」。现统一跟随 `ctx.webServer.host`（`host-http.mjs`、`native-responses.mjs`、`server.js`）。
+- **提问卡片不会再卡住**：提交即收起卡片；失败先静默重试一次，仍失败才还原并保留所选；「已失效 / 已提交」只提示一次，不再反复弹错。
+- **新增 `/m/login`**：粘贴 `dsh web` 打印的 `?token=` 链接换取 30 天 cookie，解决安卓 WebView 没有地址栏、无法登录的问题；未登录访问 `/m/` 自动跳转过来。
+- **错误不再伪装**：上游 4xx 原样透传，不再一律改写成 502；授权门禁兼容 DSH 0.2.1 的 PeerScope（无 `principal`）。
+- 文档：新增[绑定地址、登录与红字排查](docs/host-binding-and-signin.md)。
+
 # 1.6.2 — 2026-10-19
 
 - **苹果生态（macOS 宿主 + iPhone / iPad）全面适配打通**：

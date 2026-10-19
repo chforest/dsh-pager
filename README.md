@@ -191,7 +191,7 @@ ln -s /path/to/dsh-pager/plugin ~/.dsh/profiles/web/node_modules/dsh-pager
 
 ### 2. 让手机能访问到
 
-DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。常见做法有两种，都不需要翻墙，详见 [docs/remote-access.md](docs/remote-access.md)：
+DSH 从 0.2.x 起自带一次性的 `?token=` 登录（换 30 天 cookie），但那是**入口认证**，不等于可以放心裸奔：仍然别把它直接暴露到公网。常见做法有两种，都不需要翻墙，详见 [docs/remote-access.md](docs/remote-access.md)：
 
 - **带登录的网关（推荐，作者自用）**：在一台国内云服务器上放一个带登录页的反向代理（登录页 + Cookie 方式），再通过隧道（如 WireGuard）连回家里电脑。全程国内直连，手机上不用装任何额外软件。
 - **异地组网**（如 EasyTier、ZeroTier、Tailscale、自建 WireGuard）：把手机和电脑连进同一个私有网络，再用自带的 [`tools/forward.mjs`](tools/forward.mjs) 把 DSH 转发到电脑的组网地址上。它会拒绝监听公网地址和通配地址。
@@ -207,6 +207,11 @@ DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。
       config:
         trustedHosts: ['100.64.0.5:8080']   # 手机访问时用的 host:port
 ```
+
+**DSH 0.2.x 之后的两件事**（[完整说明](docs/host-binding-and-signin.md)）：
+
+- **登录**：`dsh web` 启动会打印一条带 `?token=` 的链接，打开一次即种下 30 天有效的 cookie。安卓 App 没有地址栏，直接打开 `/m/login` 把链接粘进去即可；未登录访问 `/m/` 也会自动跳过去。
+- **绑定地址**：`--host 10.x.x.x` 时回环地址是不监听的，插件内部调用必须跟随这个绑定地址（本仓库已修）。如果手机上点提交报「家里电脑暂时连不上」，先看[这篇排查](docs/host-binding-and-signin.md)。
 
 ### 3. 在手机上装 App
 
