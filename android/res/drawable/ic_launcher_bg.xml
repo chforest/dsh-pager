@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Multi-host build: teal instead of the single-host indigo, so the two apps
+     are told apart at a glance in the launcher and in the app switcher. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
@@ -13,8 +15,8 @@
                 android:startY="8"
                 android:endX="90"
                 android:endY="100"
-                android:startColor="#FF6F87FF"
-                android:endColor="#FF3548DA" />
+                android:startColor="#FF3ACFB0"
+                android:endColor="#FF0E7A66" />
         </aapt:attr>
     </path>
 </vector>

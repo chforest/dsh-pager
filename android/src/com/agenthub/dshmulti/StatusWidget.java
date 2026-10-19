@@ -1,4 +1,4 @@
-package com.agenthub.dsh;
+package com.agenthub.dshmulti;
 
 import android.app.PendingIntent;
 import android.appwidget.AppWidgetManager;

@@ -1,4 +1,4 @@
-package com.agenthub.dsh;
+package com.agenthub.dshmulti;
 public final class DownloadPolicyTest {
     static int checks;
     static void check(boolean value) { checks++; if(!value)throw new AssertionError("check "+checks); }

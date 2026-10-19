@@ -1,4 +1,4 @@
-package com.agenthub.dsh;
+package com.agenthub.dshmulti;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -45,15 +45,15 @@ import java.util.Set;
  * network access) alive while the phone dozes.
  */
 public class NotifyService extends Service {
-    static final String ACTION_ALLOW = "com.agenthub.dsh.ALLOW";
-    static final String ACTION_DENY = "com.agenthub.dsh.DENY";
-    static final String ACTION_RECONNECT = "com.agenthub.dsh.RECONNECT";
+    static final String ACTION_ALLOW = "com.agenthub.dshmulti.ALLOW";
+    static final String ACTION_DENY = "com.agenthub.dshmulti.DENY";
+    static final String ACTION_RECONNECT = "com.agenthub.dshmulti.RECONNECT";
     /** Pick one option of a question, straight from the notification. */
-    static final String ACTION_ANSWER = "com.agenthub.dsh.ANSWER";
+    static final String ACTION_ANSWER = "com.agenthub.dshmulti.ANSWER";
     /** Type the answer to a question (RemoteInput). */
-    static final String ACTION_ANSWER_TEXT = "com.agenthub.dsh.ANSWER_TEXT";
+    static final String ACTION_ANSWER_TEXT = "com.agenthub.dshmulti.ANSWER_TEXT";
     /** Type the next instruction under a "done" notice (RemoteInput). */
-    static final String ACTION_REPLY = "com.agenthub.dsh.REPLY";
+    static final String ACTION_REPLY = "com.agenthub.dshmulti.REPLY";
     static final String KEY_TEXT = "text";
     static final String CH_ALERT = "alert";
     static final String CH_DONE = "done";
