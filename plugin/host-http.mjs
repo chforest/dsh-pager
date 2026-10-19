@@ -1,4 +1,16 @@
 // Host-only loopback transport. Never expose the launch token or cookie to clients.
+
+/**
+ * The origin this process serves from. `dsh web --host 10.181.64.56` binds one
+ * concrete interface, so 127.0.0.1 is not listening at all and every internal
+ * call to it fails with ECONNREFUSED — which the mobile UI could only report as
+ * "家里电脑暂时连不上". Follow the configured bind address instead.
+ */
+export function hostOrigin(ctx){
+ const host=typeof ctx?.webServer?.host==='string'&&ctx.webServer.host?ctx.webServer.host:'127.0.0.1'
+ const authority=host.includes(':')&&!host.startsWith('[')?`[${host}]`:host
+ return `http://${authority}:${ctx.webServer.port}`
+}
 export function authorizeHostOwner(ctx,req){
  const connection=ctx.connection
  if(typeof connection?.requestRejection!=='function')return undefined
@@ -8,7 +20,7 @@ export function authorizeHostOwner(ctx,req){
 }
 export function createHostFetch(ctx,{fetcher=fetch}={}){
  let cookiePromise
- const origin=()=>`http://127.0.0.1:${ctx.webServer.port}`
+ const origin=()=>hostOrigin(ctx)
  async function cookie(){
   if(typeof ctx.connection?.authenticatedUrl!=='function')return ''
   if(!cookiePromise)cookiePromise=(async()=>{

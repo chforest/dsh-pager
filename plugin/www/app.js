@@ -259,9 +259,19 @@
     }, function () { throw new Error('请求失败 (HTTP ' + r.status + ')') })
   }
   function get(path) { return fetch(path, { cache: 'no-store', redirect: 'manual' }).then(handle) }
-  function post(path, body) { return fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'manual' }).then(handle) }
+  function post(path, body, signal) { return fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'manual', signal: signal }).then(handle) }
   function rpc(method, payload, rpcId) { return post('/m/api/rpc', { method: method, payload: payload, rpcId: rpcId }) }
-  function respond(rpcId, result) { return post('/m/api/respond', { rpcId: rpcId, result: result }) }
+  // A phone link that dies mid-request leaves fetch pending forever: the answer
+  // reaches the host but the promise never settles, so the card stayed on screen
+  // and every later tap reported "expired". Cap the wait so the dock can move on
+  // instead of hanging on a dead socket.
+  function respond(rpcId, result) {
+    var signal = typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(20000) : undefined
+    return post('/m/api/respond', { rpcId: rpcId, result: result }, signal).then(null, function (err) {
+      if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) throw new Error('发送超时，未收到回执')
+      throw err
+    })
+  }
   function imgUrl(s, id) { return '/m/api/img?s=' + enc(s) + '&id=' + enc(id) }
 
   // ------------------------------------------------------------ state
@@ -2936,6 +2946,34 @@
   el.toBottom.onclick = function () { el.scroller.scrollTo({ top: el.scroller.scrollHeight, behavior: 'smooth' }) }
   window.addEventListener('resize', function () { if (S.cur && nearBottom()) toBottom() })
 
+  // Take the question card down as soon as it is sent: the host may already have
+  // the answer while the phone's link drops, and a card that outlives its own
+  // submission turns every retry into "expired". The selections ride on `q`, so
+  // a send that certainly failed puts the card back with the user's choices.
+  // A transport failure gets one silent retry: the answer RPC is idempotent, and
+  // a card whose question the host has already settled cannot be answered at all.
+  function settleQuestion(q, result) {
+    if (q._sending) return
+    q._sending = true
+    S.qs.delete(q.rpc); drawDock(); scheduleHome()
+    function send(tries) {
+      respond(q.rpc, result).then(function () {
+        buzz()
+      }, function (err) {
+        var message = (err && err.message) || '发送失败'
+        if (/已失效|已提交|已经处理|not.?pending|unknown rpc/i.test(message)) { toast('这条问题已经处理过了'); return }
+        if (tries > 0 && /连不上|超时|HTTP 5|upstream|timeout/i.test(message)) {
+          setTimeout(function () { send(tries - 1) }, 800)
+          return
+        }
+        q._sending = false
+        S.qs.set(q.rpc, q); drawDock(); scheduleHome()
+        toast(message + '，可以重新提交', 'err')
+      })
+    }
+    send(1)
+  }
+
   el.dock.addEventListener('click', function (e) {
     var c = S.chats.get(S.cur), b
     if (!c) return
@@ -2977,7 +3015,7 @@
         return
       }
       if (e.target.closest('[data-qcancel]')) {
-        respond(q.rpc, { ok: false, error: { code: 'cancelled', message: 'the user closed this question request', details: {} } }).then(function () { S.qs.delete(q.rpc); drawDock(); scheduleHome() }, function (err) { toast(err.message, 'err') })
+        settleQuestion(q, { ok: false, error: { code: 'cancelled', message: 'the user closed this question request', details: {} } })
         return
       }
       if (e.target.closest('[data-qsubmit]')) {
@@ -2990,7 +3028,7 @@
           return ans
         })
         if (missing) { toast('每个问题都需要回答'); return }
-        respond(q.rpc, { ok: true, value: { sessionId: q.s, answer: { answers: answers } } }).then(function () { S.qs.delete(q.rpc); drawDock(); scheduleHome(); buzz() }, function (err) { toast(err.message, 'err') })
+        settleQuestion(q, { ok: true, value: { sessionId: q.s, answer: { answers: answers } } })
         return
       }
       return

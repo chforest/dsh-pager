@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import {createHostFetch} from './host-http.mjs'
+import {createHostFetch,hostOrigin} from './host-http.mjs'
 const bad=(message,status=409)=>Object.assign(Error(message),{status})
 export function createNativeResponses(ctx,{fetcher=createHostFetch(ctx)}={}){
  const listeners=new Set(),pending=new Map();let controller,clientId,generation=0
@@ -7,8 +7,8 @@ export function createNativeResponses(ctx,{fetcher=createHostFetch(ctx)}={}){
  function withdrawn(row){emit({payload:row.kind==='approval'?{type:'approval/resolved',sessionId:row.sessionId,approvalId:row.eventId}:{type:'question/resolved',sessionId:row.sessionId,questionRpcId:row.rpc}})}
  async function send(eventId,outcome){
   if(!clientId)throw bad('提问连接已断开，请刷新后核对')
-  const response=await fetcher(`http://127.0.0.1:${ctx.webServer.port}/api/$events/result`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:crypto.randomUUID(),method:'$events/result',payload:{args:{clientId,eventId,outcome}}}),signal:AbortSignal.timeout(30000)})
-  const result=await response.json();if(!response.ok||!result.result?.ok)throw bad('回答结果未确认，请刷新核对，不要重复提交')
+  const response=await fetcher(`${hostOrigin(ctx)}/api/$events/result`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:crypto.randomUUID(),method:'$events/result',payload:{args:{clientId,eventId,outcome}}}),signal:AbortSignal.timeout(30000)})
+ const result=await response.json();if(!response.ok||!result.result?.ok)throw bad('回答结果未确认，请刷新核对，不要重复提交')
  }
  async function start(){
   if(controller)return

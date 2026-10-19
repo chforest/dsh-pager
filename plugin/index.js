@@ -13,7 +13,7 @@
  * @module dsh-pager
  */
 
-import { createMobile } from './server.js?suggestions-v1'
+import { createMobile } from './server.js?suggestions-v2-login'
 import fs from 'node:fs'
 import {createNativeResponses} from './native-responses.mjs'
 import {createHostRpc,createHostEvents,createOwnerAuthorizer,hasNativeController,nativeHostDependencies} from './host-compat.mjs'
@@ -66,6 +66,7 @@ export async function apply(ctx, config) {
     screenshotTranslate,
     suggestionProvider:suggestions.get,
     apiPort: () => ctx.webServer.port,
+    apiHost: () => ctx.webServer.host,
     log: (msg) => process.stdout.write(`[dsh-pager] ${msg}\n`),
     trustedHosts,
     pushDir: (config && config.pushDir) || undefined,

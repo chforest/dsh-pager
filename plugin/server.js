@@ -157,6 +157,80 @@ function acceptsGzip(req) {
   return /\bgzip\b/.test(req.headers['accept-encoding'] || '')
 }
 
+/**
+ * Sign-in page for hosts whose DSH carries browser-session authentication
+ * (0.2.x). The pager's owner gate reads the same cookie DSH mints from its
+ * `?token=` launch URL, so a device that has never seen that URL (notably the
+ * Android app's WebView, which has no address bar) needs a place to paste it.
+ *
+ * The form never validates a token itself: it fetches the pasted token from
+ * DSH's own `/` (same origin) and lets DSH mint the session cookie, then enters
+ * the app. Only a 200 after that redirect confirms the token was accepted.
+ */
+const LOGIN_HTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f5f6f8">
+<title>登录 · DSH 寻呼机</title>
+<style>
+:root{color-scheme:light dark}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f5f6f8;color:#1b1d21;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;padding:24px}
+@media(prefers-color-scheme:dark){body{background:#111315;color:#e9ecef}textarea{border-color:#333a42!important}.tip{color:#7c8591!important}}
+main{width:100%;max-width:420px}
+h1{font-size:20px;margin:0 0 8px}
+p{color:#6a7280;margin:0 0 16px;font-size:14px}
+code{font-size:13px}
+textarea{width:100%;min-height:88px;padding:12px;border-radius:12px;border:1px solid #cfd5dd;background:transparent;color:inherit;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
+button{margin-top:14px;width:100%;padding:14px;border:0;border-radius:12px;background:#2f6fed;color:#fff;font-size:16px;font-weight:600}
+button:disabled{opacity:.6}
+.msg{margin-top:12px;font-size:14px;color:#b23b3b;min-height:20px}
+.tip{margin-top:22px;font-size:12px;color:#8a929e;line-height:1.6}
+</style>
+</head>
+<body>
+<main>
+<h1>DSH 寻呼机</h1>
+<p>粘贴电脑上 <code>dsh web</code> 打印的登录链接，或只粘贴其中的 token。</p>
+<textarea id="v" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="http://…:3080/?token=…"></textarea>
+<button id="go">登录</button>
+<div class="msg" id="msg"></div>
+<div class="tip">登录一次可用 30 天。链接每次 DSH 重启都会变，在运行 dsh web 的终端里能找到。</div>
+</main>
+<script>
+(function () {
+  var v = document.getElementById('v'), go = document.getElementById('go'), msg = document.getElementById('msg')
+  function token(text) {
+    text = String(text || '').trim()
+    if (!text) return ''
+    try { var u = new URL(text); var t = u.searchParams.get('token'); if (t) return t.trim() } catch (e) {}
+    var m = text.match(/[?&]token=([^&\\s#]+)/)
+    if (m) { try { return decodeURIComponent(m[1]) } catch (e) { return m[1] } }
+    if (/^[A-Za-z0-9_-]{20,}$/.test(text)) return text
+    return ''
+  }
+  function fail(t) { go.disabled = false; msg.textContent = t }
+  function login() {
+    var t = token(v.value)
+    if (!t) return fail('没有找到 token，请粘贴完整链接')
+    go.disabled = true; msg.textContent = '正在登录…'
+    fetch('/?token=' + encodeURIComponent(t), { cache: 'no-store', redirect: 'follow', credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.ok) { location.replace('/m/'); return }
+        fail(r.status === 401 ? '链接无效或已过期，请用终端里最新打印的那条' : '登录失败：HTTP ' + r.status)
+      }, function (e) { fail('登录失败：' + ((e && e.message) || e)) })
+  }
+  go.addEventListener('click', login)
+  v.addEventListener('keydown', function (e) { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) login() })
+  v.focus()
+})()
+</script>
+</body>
+</html>
+`
+
 function json(req, res, status, obj) {
   let body = Buffer.from(JSON.stringify(obj))
   const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
@@ -195,7 +269,7 @@ function readJson(req, limit) {
  *   starts one of them; only the demo (demo/fake-dsh.mjs) replaces the real ones.
  * @returns {{ handle: (req, res) => Promise<void>, close: () => void }}
  */
-export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk, externalAgents = false, previewDir, voiceDir, questionDir, remoteFolderOptions, ffmpeg, transcripts = {}, spawnAgent = spawn, pickDirectory = pickDesktopDirectory, captureRegion = captureDesktopRegion, screenshotTranslate, screenshotRecognize, suggestionProvider, hostRpc, authorizeRequest, nativeStreams, nativeRespond }) {
+export function createMobile({ apiPort, apiHost: apiHostOption, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk, externalAgents = false, previewDir, voiceDir, questionDir, remoteFolderOptions, ffmpeg, transcripts = {}, spawnAgent = spawn, pickDirectory = pickDesktopDirectory, captureRegion = captureDesktopRegion, screenshotTranslate, screenshotRecognize, suggestionProvider, hostRpc, authorizeRequest, nativeStreams, nativeRespond }) {
   if (typeof externalAgents !== 'boolean') throw new Error('externalAgents must be a boolean')
   // Fail the load loudly, as DSH does, rather than 403 every phone request later.
   const badHost = trustedHosts.find((h) => canonicalTrustedHost(h) === null)
@@ -242,11 +316,18 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   let shell = null
   const previews = createVideoPreviews({ dir: previewDir || path.join(PLUGIN_DIR, '.cache', 'video'), ffmpeg, log })
 
-  const base = () => `http://127.0.0.1:${apiPort()}`
+  // DSH binds one concrete interface (`dsh web --host …`), so 127.0.0.1 is not
+  // always listening; follow the configured bind address for internal calls.
+  const apiHost = () => {
+    const host = typeof apiHostOption === 'function' ? apiHostOption() : '127.0.0.1'
+    const value = typeof host === 'string' && host ? host : '127.0.0.1'
+    return value.includes(':') && !value.startsWith('[') ? `[${value}]` : value
+  }
+  const base = () => `http://${apiHost()}:${apiPort()}`
 
   // Always-on watcher behind /m/api/notify. Started shortly after load (DSH may
   // still be binding its port) so notices are buffered even before a phone connects.
-  const hub = new NotifyHub({ wsBase: () => `ws://127.0.0.1:${apiPort()}`, listSessions: () => value('session.list', {}), log, nativeStreams })
+  const hub = new NotifyHub({ wsBase: () => `ws://${apiHost()}:${apiPort()}`, listSessions: () => value('session.list', {}), log, nativeStreams })
   const hubTimer = setTimeout(() => hub.start(), 3000)
   hubTimer.unref?.()
 
@@ -285,7 +366,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     if (!/^[0-9a-f]{64}$/.test(hookToken)) hookToken = crypto.randomBytes(32).toString('hex')
     try {
       fs.mkdirSync(dataDir, { recursive: true })
-      fs.writeFileSync(file, JSON.stringify({ url: `http://127.0.0.1:${servePort()}/m/api/agents/hook`, token: hookToken }, null, 1), { mode: 0o600 })
+      fs.writeFileSync(file, JSON.stringify({ url: `http://${apiHost()}:${servePort()}/m/api/agents/hook`, token: hookToken }, null, 1), { mode: 0o600 })
     } catch (err) { log(`agents: cannot write hook.json: ${err.message}`) }
   }
   const hookTimer = setTimeout(writeHookConfig, 3000)
@@ -640,7 +721,16 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       body: JSON.stringify({ type: 'client-response', rpcId: body.rpcId, result: body.result }),
       signal: AbortSignal.timeout(30000),
     })
-    if (!res.ok) throw Object.assign(new Error(`respond HTTP ${res.status}`), { status: 502 })
+    if (!res.ok) {
+      // A 4xx from DSH is about this answer (unknown rpcId, already settled),
+      // not about the computer being offline. Keep the status and the host's
+      // own wording so the phone can stop saying "家里电脑暂时连不上" for an
+      // answer the host already has.
+      let detail = ''
+      try { const payload = await res.json(); detail = (payload && payload.error && payload.error.message) || '' } catch {}
+      const status = res.status >= 400 && res.status < 500 ? res.status : 502
+      throw Object.assign(new Error(detail || `respond HTTP ${res.status}`), { status })
+    }
     return res.json()
   }
 
@@ -862,16 +952,47 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   function events(req, res) {
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no' })
     res.write('retry: 2000\n\n')
-    const b = new Bridge(res, `ws://127.0.0.1:${apiPort()}`, log, () => bridges.delete(b), externalAgents ? agents : null, nativeStreams)
+    const b = new Bridge(res, `ws://${apiHost()}:${apiPort()}`, log, () => bridges.delete(b), externalAgents ? agents : null, nativeStreams)
     bridges.add(b)
     req.on('close', () => b.close())
+  }
+
+  function serveLogin(req, res) {
+    res.writeHead(200, {
+      'content-type': MIME['.html'],
+      'cache-control': 'no-store',
+      'referrer-policy': 'no-referrer',
+      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'",
+    })
+    res.end(req.method === 'HEAD' ? undefined : LOGIN_HTML)
   }
 
   async function handle(req, res) {
     try {
       const url = new URL(req.url || '/', 'http://local')
       const p = url.pathname
-      if (authorizeRequest) { const admission = await authorizeRequest(req); if (!admission?.ok) return json(req, res, admission?.status || 403, { ok: false, error: { code: 'unauthorized', message: '需要登录已授权的 DSH 账号' } }) }
+      // Public by design: the sign-in page only forwards a pasted token to DSH's
+      // own token exchange, which decides whether it is valid.
+      if (p === '/m/login') {
+        if (authorizeRequest && (await authorizeRequest(req))?.ok) {
+          res.writeHead(302, { location: '/m/', 'cache-control': 'no-store' }); res.end(); return
+        }
+        return serveLogin(req, res)
+      }
+      if (authorizeRequest) {
+        const admission = await authorizeRequest(req)
+        if (!admission?.ok) {
+          // A browser navigation gets the sign-in page (the phone app has no
+          // address bar to paste DSH's ?token= URL into); API calls keep JSON.
+          const navigation = (p === '/m' || p === '/m/' || p === '/m/index.html')
+            && /text\/html/i.test(req.headers.accept || '')
+            && (req.method === 'GET' || req.method === 'HEAD')
+          if (navigation) {
+            res.writeHead(302, { location: '/m/login', 'cache-control': 'no-store' }); res.end(); return
+          }
+          return json(req, res, admission?.status || 403, { ok: false, error: { code: 'unauthorized', message: '需要登录已授权的 DSH 账号' } })
+        }
+      }
       if (p === '/m') { res.writeHead(308, { location: '/m/' + url.search }); res.end(); return }
       if (p === '/m/' || p === '/m/index.html') return serveShell(req, res)
       if (p.startsWith('/m/api/')) {
